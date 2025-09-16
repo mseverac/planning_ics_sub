@@ -23,4 +23,11 @@ jobs:
         run: pip install requests beautifulsoup4 lxml
 
       - name: Run script
-        run: python test_get_ics.py
+        run: python get_ics.py
+
+      - name: Upload ICS file
+        uses: actions/upload-artifact@v3
+        with:
+          name: planning
+          path: planning.ics
+
