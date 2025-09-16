@@ -15,6 +15,9 @@ from datetime import datetime
 
 import os
 # Récupère le mot de passe depuis la variable d'environnement ONBOARD_PASS
+
+
+
 password = os.environ.get("ONBOARD_PASS")
 if not password:
     raise SystemExit("Erreur: la variable d'environnement ONBOARD_PASS n'est pas définie. "
@@ -339,62 +342,73 @@ def main():
     print("idInit:", id_init_val)
 
     # 7) POST requête 3 (download ICS)
-    payload3 = {
-        "javax.faces.partial.ajax": "true",
-        "javax.faces.source": "form:j_idt118",
-        "javax.faces.partial.execute": "form:j_idt118",
-        "javax.faces.partial.render": "form:j_idt118",
-        "form:j_idt118": "form:j_idt118",
-        # timestamps: ajuster si besoin
-        "form:j_idt118_start": "1757887200000",
-        "form:j_idt118_end": "1758405600000",
-        "form": "form",
-        "form:largeurDivCenter": largeur,
-        "form:idInit": id_init_val,
-        "form:date_input": "15/09/2025",
-        "form:week": "38-2025",
-        "form:j_idt118_view": "agendaWeek",
-        "form:offsetFuseauNavigateur": "-7200000",
-        "form:onglets_activeIndex": "0",
-        "form:onglets_scrollState": "0",
-        # ViewState injecté automatiquement
-    }
-
-    r = requete_post(payload3, "download_ics", url=PLANNING_PAGE, ajax=False, pause=1.0)
-
-    payload4 = {
-        "javax.faces.partial.ajax": "true",
-        "javax.faces.source": "form:j_idt118",
-        "javax.faces.partial.execute": "form:j_idt118",
-        "javax.faces.partial.render": "form:j_idt118",
-        "form:j_idt118": "form:j_idt118",
-        "form:j_idt118_start": "1756677600000",
-        "form:j_idt118_end": "1760220000000",
-        "form": "form",
-        "form:largeurDivCenter": "1550",
-        "form:idInit": "webscolaapp.Planning_-7772623432697926238",
-        "form:date_input": "15/09/2025",
-        "form:week": "38-2025",
-        "form:j_idt118_view": "agendaWeek",
-        "form:offsetFuseauNavigateur": "-7200000",
-        "form:onglets_activeIndex": "0",
-        "form:onglets_scrollState": "0",
-    }
-
-    r = requete_post(payload4, "final_ics_download", url=PLANNING_PAGE, ajax=False, pause=1.0)
 
 
+    def dl_ics(date,week):
+        payload3 = {
+            "javax.faces.partial.ajax": "true",
+            "javax.faces.source": "form:j_idt118",
+            "javax.faces.partial.execute": "form:j_idt118",
+            "javax.faces.partial.render": "form:j_idt118",
+            "form:j_idt118": "form:j_idt118",
+            # timestamps: ajuster si besoin
+            "form:j_idt118_start": "1757887200000",
+            "form:j_idt118_end": "1775944800000",
+            "form": "form",
+            "form:largeurDivCenter": largeur,
+            "form:idInit": id_init_val,
+            "form:date_input": date,
+            "form:week": week,
+            "form:j_idt118_view": "agendaWeek",
+            "form:offsetFuseauNavigateur": "-7200000",
+            "form:onglets_activeIndex": "0",
+            "form:onglets_scrollState": "0",
+            # ViewState injecté automatiquement
+        }
 
-    content = r.text
+        r = requete_post(payload3, "download_ics", url=PLANNING_PAGE, ajax=False, pause=1.0)
 
-    print("----------")
+        payload4 = {
+            "javax.faces.partial.ajax": "true",
+            "javax.faces.source": "form:j_idt118",
+            "javax.faces.partial.execute": "form:j_idt118",
+            "javax.faces.partial.render": "form:j_idt118",
+            "form:j_idt118": "form:j_idt118",
+            "form:j_idt118_start": "1756677600000",
+            "form:j_idt118_end": "1775944800000",
+            "form": "form",
+            "form:largeurDivCenter": "1550",
+            "form:idInit": "webscolaapp.Planning_-7772623432697926238",
+            "form:date_input": date,
+            "form:week": week,
+            "form:j_idt118_view": "agendaWeek",
+            "form:offsetFuseauNavigateur": "-7200000",
+            "form:onglets_activeIndex": "0",
+            "form:onglets_scrollState": "0",
+        }
 
-    print(content)
-
-    print("----------")
+        r = requete_post(payload4, "final_ics_download", url=PLANNING_PAGE, ajax=False, pause=1.0)
 
 
-    save_ics_from_partial_response(content, filename="planning.ics")
+
+        content = r.text
+
+        print("----------")
+
+        print(content)
+
+        print("----------")
+
+        save_ics_from_partial_response(content, filename="planning.ics")
+
+    date1 = "13/09/2025"
+    week1 = "38-2025"
+
+
+    dl_ics(date1,week1)
+
+
+
     
 
 
