@@ -12,10 +12,10 @@ jobs:
       ONBOARD_PASS: ${{ secrets.ONBOARD_PASS }}
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4   # mise à jour
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5   # mise à jour
         with:
           python-version: "3.11"
 
@@ -26,7 +26,7 @@ jobs:
         run: python get_ics.py
 
       - name: Upload ICS file
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4   # mise à jour
         with:
           name: planning
           path: planning.ics
