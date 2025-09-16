@@ -1,7 +1,6 @@
 # refactor of get_ics_full_flow.py
 # Usage: ensure mdp.password exists, then run `python3 get_ics_refactor.py`
 
-from mdp import password
 import requests
 from bs4 import BeautifulSoup
 import xml.etree.ElementTree as ET
@@ -12,6 +11,17 @@ import time
 import re
 import json
 from datetime import datetime
+
+
+import os
+# Récupère le mot de passe depuis la variable d'environnement ONBOARD_PASS
+password = os.environ.get("ONBOARD_PASS")
+if not password:
+    raise SystemExit("Erreur: la variable d'environnement ONBOARD_PASS n'est pas définie. "
+                     "Sous GitHub Actions, ajoute-la dans Settings → Secrets.")
+# optionnel : username aussi configurable via env (par défaut ta valeur actuelle)
+USERNAME = os.environ.get("ONBOARD_USER", "mseverac2023")
+
 
 def save_ics_from_partial_response(response_text: str, filename="monplanning.ics"):
     """
