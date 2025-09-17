@@ -24,23 +24,19 @@ if not password:
                      "Sous GitHub Actions, ajoute-la dans Settings → Secrets.")
 # optionnel : username aussi configurable via env (par défaut ta valeur actuelle)
 USERNAME = os.environ.get("ONBOARD_USER", "mseverac2023")
-
 import re
 import json
 from datetime import datetime
-import re
-import json
-from datetime import datetime
-
-
-
-
 
 def save_ics_from_partial_response(response_text: str, filename="monplanning.ics"):
     """
     Extrait les événements depuis une réponse partielle JSF contenant un JSON
-    et enregistre un fichier ICS. Produit plusieurs VCALENDAR (un par couleur)
-    pour qu'Apple Calendar crée plusieurs calendriers avec les couleurs attendues.
+    et enregistre un fichier ICS. Ajoute une couleur par événement selon le SUMMARY :
+      - CM   -> bleu marine (#000080)
+      - TD   -> bleu clair  (#ADD8E6)
+      - TP   -> vert        (#008000)
+      - DS   -> rouge       (#FF0000)
+      - MANIF-> jaune       (#FFD700)
     """
     # --- 1) extraire le JSON avec une regex ---
     m = re.search(r'\[\{.*\}\]', response_text, re.DOTALL)
@@ -51,95 +47,75 @@ def save_ics_from_partial_response(response_text: str, filename="monplanning.ics
     # --- 2) parser le JSON ---
     events = json.loads(events_json)
 
-    # mapping summary -> (calendar name suffix, hex color)
-    mapping = {
-        "CM":    ("CM - Cours (CM)", "#000080"),  # bleu marine
-        "TD":    ("TD - Travaux Dirigés", "#ADD8E6"),  # bleu clair
-        "TP":    ("TP - Travaux Pratiques", "#008000"),  # vert
-        "DS":    ("DS - Devoir Surveillé", "#FF0000"),  # rouge
-        "MANIF": ("MANIF - Manifestation", "#FFD700"),  # jaune
-    }
-
-    def find_key_for_summary(summary: str):
+    # helper: map summary -> couleur hex
+    def color_for_summary(summary: str):
         if not summary:
             return None
         s = summary.upper()
-        for key in mapping:
-            # cherche le mot exact (bordé par non-lettres) pour éviter faux positifs
-            if re.search(rf'(?<![A-Z0-9]){re.escape(key)}(?![A-Z0-9])', s):
-                return key
+        if re.search(r'\bCM\b', s):
+            return "#000080"   # bleu marine
+        if re.search(r'\bTD\b', s):
+            return "#ADD8E6"   # bleu clair
+        if re.search(r'\bTP\b', s):
+            return "#008000"   # vert
+        if re.search(r'\bDS\b', s):
+            return "#FF0000"   # rouge
+        if re.search(r'\bMANIF\b', s):
+            return "#FFD700"   # jaune
         return None
 
-    def to_ics_date(dt_str):
-        # exemple: "2025-09-08T10:15:00+0200"
-        dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S%z")
-        return dt.strftime("%Y%m%dT%H%M%S")
+    # --- 3) construire le contenu ICS ---
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Onboard//Planning//FR",
+        "CALSCALE:GREGORIAN",
+    ]
 
-    # --- regrouper events par "cal" (clé = key ou 'DEFAULT') ---
-    calendars = {}  # key -> {"name":..., "color":..., "events":[...]}
-    default_name = "Planning"
-    default_color = None
-
-    for cal_obj in events:
-        ev_list = cal_obj.get("events") if isinstance(cal_obj, dict) else None
+    event_count = 0
+    # attention: ton JSON semble contenir une liste et les events dans events[0]["events"]
+    for cal in events:
+        ev_list = cal.get("events") if isinstance(cal, dict) else None
         if not ev_list:
             continue
         for ev in ev_list:
-            summary = ev.get("title", "").strip()
-            key = find_key_for_summary(summary) or "DEFAULT"
-            if key == "DEFAULT":
-                name = default_name
-                color = default_color
-            else:
-                name, color = mapping[key]
-
-            if key not in calendars:
-                calendars[key] = {"name": name, "color": color, "events": []}
-            calendars[key]["events"].append(ev)
-
-    # --- 3) construire contenu ICS avec plusieurs VCALENDAR ---
-    out_lines = []
-    event_count = 0
-
-    for key, cal in calendars.items():
-        # commencer un VCALENDAR
-        out_lines.extend([
-            "BEGIN:VCALENDAR",
-            "VERSION:2.0",
-            "PRODID:-//Onboard//Planning//FR",
-            "CALSCALE:GREGORIAN",
-            # Nom du calendrier visible dans l'app Calendrier
-            f"X-WR-CALNAME:{cal['name']}",
-        ])
-        if cal["color"]:
-            out_lines.append(f"X-APPLE-CALENDAR-COLOR:{cal['color']}")
-        # ajouter events
-        for ev in cal["events"]:
             event_count += 1
-            uid = ev.get("id", "") + f"@onboard.ec-nantes.fr"
+
+            # convertir start/end en format iCalendar (local)
+            def to_ics_date(dt_str):
+                # exemple: "2025-09-08T10:15:00+0200"
+                dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S%z")
+                return dt.strftime("%Y%m%dT%H%M%S")
+
+            uid = ev.get("id", "") + "@onboard.ec-nantes.fr"
             start = to_ics_date(ev["start"])
             end = to_ics_date(ev["end"])
             summary = ev.get("title", "").strip()
-            # ajouter DTSTAMP
-            dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+            # déterminer couleur
+            color = color_for_summary(summary)
 
             vevent = [
                 "BEGIN:VEVENT",
                 f"UID:{uid}",
-                f"DTSTAMP:{dtstamp}",
                 f"DTSTART;TZID=Europe/Paris:{start}",
                 f"DTEND;TZID=Europe/Paris:{end}",
                 f"SUMMARY:{summary}",
-                "END:VEVENT",
             ]
-            out_lines.extend(vevent)
 
-        out_lines.append("END:VCALENDAR")
-        # Note : on concatène plusieurs VCALENDAR dans le même fichier
+            # ajouter propriétés de couleur si définie (X-APPLE pour Apple Calendar)
+            if color:
+                vevent.append(f"X-APPLE-CALENDAR-COLOR:{color}")
+                vevent.append(f"COLOR:{color}")  # propriété non standard, parfois utilisée
+
+            vevent.append("END:VEVENT")
+            lines.extend(vevent)
+
+    lines.append("END:VCALENDAR")
 
     # --- 4) écrire le fichier ---
     with open(filename, "w", encoding="utf-8") as f:
-        f.write("\r\n".join(out_lines))  # CRLF recommandé pour iCalendar
+        f.write("\n".join(lines))
 
     print(f"✅ Fichier ICS généré avec {event_count} événements -> {filename}")
 
