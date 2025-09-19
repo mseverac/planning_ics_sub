@@ -37,136 +37,60 @@ from typing import Dict, Tuple
 
 new_id = None
 
-def save_ics_from_partial_response(response_text: str,
-                                   filename: str = "monplanning.ics",
-                                   prodid_base: str = "-//Onboard//Planning//FR") -> Dict[str, str]:
+import re
+import json
+from datetime import datetime
+
+def save_ics_from_partial_response(partial_response: str, filename: str = "planning.ics"):
     """
-    Extrait les événements depuis une réponse partielle JSF contenant un JSON
-    et enregistre un fichier .ics contenant plusieurs VCALENDAR (un par groupe).
-    Retourne un dictionnaire 'headers' à utiliser pour la réponse HTTP :
-      - Content-Type: text/calendar; charset=utf-8
-      - Cache-Control: no-cache
-      - ETag: "<sha1>"
-
-    Structure attendue du JSON : une liste d'objets contenant chacun une clé "events"
-    (comme dans tes exemples précédents).
+    Extrait les événements d'une réponse partielle et génère un fichier ICS (planning.ics par défaut).
+    
+    Args:
+        partial_response (str): Réponse partielle contenant les événements.
+        filename (str): Nom du fichier ICS à sauvegarder.
     """
-    # --- 1) extraire le JSON avec une regex ---
-    m = re.search(r'\[\{.*\}\]', response_text, re.DOTALL)
-    if not m:
-        raise ValueError("Impossible de trouver le JSON des événements dans la réponse.")
-    events_json = m.group(0)
+    # Extraction de la partie JSON après <![CDATA[
+    match = re.search(r'\[\{.*\}\]', partial_response, re.DOTALL)
+    if not match:
+        raise ValueError("Impossible de trouver les événements dans la réponse partielle")
+    
+    events_json = match.group(0)
+    events = json.loads(events_json)
 
-    # --- 2) parser le JSON ---
-    events_container = json.loads(events_json)
+    # Création de l’entête ICS
+    ics_lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Custom Export//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH"
+    ]
 
-    # --- 3) mapping summary -> (calendar name, hex color) ---
-    mapping = {
-        "CM":    ("CM - Cours (CM)", "#000080"),        # bleu marine
-        "TD":    ("TD - Travaux Dirigés", "#ADD8E6"),   # bleu clair
-        "TP":    ("TP - Travaux Pratiques", "#008000"), # vert
-        "DS":    ("DS - Devoir Surveillé", "#FF0000"),  # rouge
-        "MANIF": ("MANIF - Manifestation", "#FFD700"), # jaune
-    }
-
-    def find_key_for_summary(summary: str) -> str:
-        if not summary:
-            return "DEFAULT"
-        s = summary.upper()
-        for key in mapping:
-            # mot séparé (évite faux-positifs)
-            if re.search(rf'(?<![A-Z0-9]){re.escape(key)}(?![A-Z0-9])', s):
-                return key
-        return "DEFAULT"
-
-    def to_ics_date(dt_str: str) -> str:
-        # exemple attendu: "2025-09-08T10:15:00+0200"
-        dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S%z")
-        return dt.strftime("%Y%m%dT%H%M%S")
-
-    # --- 4) regrouper les events par clé (CM, TD, ...) ---
-    calendars = {}  # key -> {"name":..., "color":..., "events":[...]}
-    for cal_obj in events_container:
-        ev_list = cal_obj.get("events") if isinstance(cal_obj, dict) else None
-        if not ev_list:
-            continue
-        for ev in ev_list:
-            summary = (ev.get("title") or "").strip()
-            key = find_key_for_summary(summary)
-            if key == "DEFAULT":
-                name = "Planning"
-                color = None
-            else:
-                name, color = mapping[key]
-            calendars.setdefault(key, {"name": name, "color": color, "events": []})
-            calendars[key]["events"].append(ev)
-
-    # --- 5) construire le contenu ICS (CRLF \r\n) avec plusieurs VCALENDAR ---
-    blocks = []
-    total_events = 0
-    cal_index = 0
-    for key, cal in calendars.items():
-        cal_index += 1
-        lines = []
-        # VCALENDAR header
-        prodid = prodid_base if cal_index == 1 else f"{prodid_base}{cal_index}"
-        lines.extend([
-            "BEGIN:VCALENDAR",
-            "VERSION:2.0",
-            f"PRODID:{prodid}",
-            "CALSCALE:GREGORIAN",
-            f"X-WR-CALNAME:{cal['name']}",
+    for ev in events:
+        dt_start = datetime.fromisoformat(ev["start"].replace("Z", "+00:00"))
+        dt_end = datetime.fromisoformat(ev["end"].replace("Z", "+00:00"))
+        
+        uid = ev["id"] + "@custom-export"
+        title = ev["title"].strip() if ev["title"] else "Sans titre"
+        
+        ics_lines.extend([
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}",
+            f"DTSTART:{dt_start.strftime('%Y%m%dT%H%M%S')}",
+            f"DTEND:{dt_end.strftime('%Y%m%dT%H%M%S')}",
+            f"SUMMARY:{title}",
+            "END:VEVENT"
         ])
-        if cal["color"]:
-            lines.append(f"X-APPLE-CALENDAR-COLOR:{cal['color']}")
 
-        # Events
-        for ev in cal["events"]:
-            total_events += 1
-            uid_raw = str(ev.get("id", "")) or f"ev{total_events}"
-            uid = f"{uid_raw}@onboard.ec-nantes.fr"
-            dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-            start = to_ics_date(ev["start"])
-            end = to_ics_date(ev["end"])
-            summary = (ev.get("title") or "Événement").replace("\n", " ").strip()
+    # Fin du fichier ICS
+    ics_lines.append("END:VCALENDAR")
 
-            vevent = [
-                "BEGIN:VEVENT",
-                f"UID:{uid}",
-                f"DTSTAMP:{dtstamp}",
-                f"DTSTART;TZID=Europe/Paris:{start}",
-                f"DTEND;TZID=Europe/Paris:{end}",
-                f"SUMMARY:{summary}",
-                "END:VEVENT",
-            ]
-            lines.extend(vevent)
-
-        lines.append("END:VCALENDAR")
-        blocks.append("\r\n".join(lines))
-
-    # Concaténer tous les VCALENDAR dans l'ordre (un seul fichier)
-    ics_content = "\r\n".join(blocks) + "\r\n"
-
-    # --- 6) écrire le fichier avec CRLF ---
-    # Important: utiliser newline='' et écrire la chaîne telle quelle pour préserver CRLF
-    with open(filename, "w", encoding="utf-8", newline='') as f:
-        f.write(ics_content)
-
-    # --- 7) calculer un ETag (SHA1) basé sur le contenu ---
-    sha1 = hashlib.sha1(ics_content.encode("utf-8")).hexdigest()
-    etag = f'"{sha1}"'
-
-    # headers à exposer via HTTP (ou à configurer dans ton hébergement)
-    headers = {
-        "Content-Type": "text/calendar; charset=utf-8",
-        "Cache-Control": "no-cache",
-        "ETag": etag,
-    }
-
-    print(f"✅ Fichier ICS généré ({total_events} événements) -> {filename}")
-    print(f"ℹ️ ETag: {etag}")
-
-    return headers
+    # Sauvegarde
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write("\n".join(ics_lines))
+    
+    print(f"✅ Fichier ICS généré : {filename}")
 
 
 
