@@ -519,7 +519,7 @@ def main():
         "form:sidebar_menuid": "8_0",
     }
 
-    new_id = "form:j_idt121"
+    new_id = "form:j_idt141"
 
     r = requete_post(payload2, "navigate_planning", url=MAINMENU_PAGE, ajax=False)
 
