@@ -630,7 +630,7 @@ print("Fini.")
     
 
 if __name__ == '__main__':
-    max_essais = 10
+    max_essais = 30
     for i in range(max_essais):
         try:
             main()
