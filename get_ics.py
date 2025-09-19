@@ -472,11 +472,14 @@ def requete_post(payload, name, url=None, ajax=False, extra_headers=None, pause=
 
     # si on a un schedule_id différent de old_id, on remplace toutes les clés/valeurs contenant old_id
     if schedule_id:
+
+        print(" ")
+        print("---->>>> remplacement auto   <<<<<-------")
+        print(schedule_id)
+        print(" ")
         if old_id and old_id != schedule_id:
             new_id = schedule_id
-            print(" ")
-            print("---->>>> remplacement auto   <<<<<-------")
-            print(" ")
+            
             replace_id(payload,schedule_id,old_id)
         # s'assurer que les champs source/execute/render pointent vers le schedule_id
         payload["javax.faces.source"] = schedule_id
@@ -592,7 +595,7 @@ def main():
         "form:sidebar_menuid": "8_0",
     }
 
-    new_id = "form:j_idt141"
+    new_id = "form:j_idt121"
 
     r = requete_post(payload2, "navigate_planning", url=MAINMENU_PAGE, ajax=False)
 
