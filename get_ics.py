@@ -570,6 +570,10 @@ def main():
         "form:j_idt815_input": "45803",
         # ViewState injecté automatiquement
     }
+
+    global new_id
+
+
     r = requete_post(payload1, "ajax_open_submenu", url=MAINMENU_PAGE, ajax=True)
 
     # 5) POST requête 2 (navigation vers Planning)
@@ -584,6 +588,9 @@ def main():
         "form:sidebar": "form:sidebar",
         "form:sidebar_menuid": "8_0",
     }
+
+    new_id = "form:j_idt141"
+
     r = requete_post(payload2, "navigate_planning", url=MAINMENU_PAGE, ajax=False)
 
     # attendre que la navigation se fasse côté serveur
