@@ -474,6 +474,9 @@ def requete_post(payload, name, url=None, ajax=False, extra_headers=None, pause=
     if schedule_id:
         if old_id and old_id != schedule_id:
             new_id = schedule_id
+            print(" ")
+            print("---->>>> remplacement auto   <<<<<-------")
+            print(" ")
             replace_id(payload,schedule_id,old_id)
         # s'assurer que les champs source/execute/render pointent vers le schedule_id
         payload["javax.faces.source"] = schedule_id
