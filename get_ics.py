@@ -475,6 +475,7 @@ def requete_post(payload, name, url=None, ajax=False, extra_headers=None, pause=
 
         print(" ")
         print("---->>>> remplacement auto   <<<<<-------")
+        print(schedule_id)
         print(" ")
         if old_id and old_id != schedule_id:
             new_id = schedule_id
