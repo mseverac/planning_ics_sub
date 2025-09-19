@@ -307,6 +307,7 @@ def requete_post(payload, name, url=None, ajax=False, extra_headers=None, pause=
 
 
     print("----")
+    print(f"new id : {new_id}")
     print(" ")
     print(f"payload effectif : {payload}")
     r = session.post(url, data=payload, headers=headers, allow_redirects=True)
