@@ -278,6 +278,7 @@ def requete_post(payload, name, url=None, ajax=False, extra_headers=None, pause=
         url = MAINMENU_PAGE
 
     # injecter le ViewState courant si pas déjà fourni
+    # injecter le ViewState courant si pas déjà fourni
     if 'javax.faces.ViewState' not in payload or not payload.get('javax.faces.ViewState'):
         if current_viewstate:
             payload['javax.faces.ViewState'] = current_viewstate
@@ -370,7 +371,71 @@ def requete_post(payload, name, url=None, ajax=False, extra_headers=None, pause=
         new_vs = extract_viewstate_from_html(r.text)
         if not new_vs:
             new_vs = extract_viewstate_from_jsf_partial(r.text)
+    # -- tentative d'analyse robuste d'une partial-response JSF (XML) --
+    schedule_id = None
+    collected_hidden = {}
 
+    try:
+        root = ET.fromstring(r.text)
+        # parcourir chaque <update> du partial-response
+        for upd in root.findall(".//update"):
+            upd_id = upd.get("id") or ""
+            upd_text = upd.text or ""
+
+            # si l'update contient le composant schedule, on peut récupérer l'id
+            # cas 1: primefaces script contient id:"form:j_idtXXX"
+            m = re.search(r'id\s*:\s*"([^"]+)"', upd_text)
+            if m:
+                candidate = m.group(1)
+                # heuristique: les ids de primefaces commencent par 'form:j_idt'
+                if re.match(r'form:j_idt\d+', candidate):
+                    schedule_id = candidate
+
+            # cas 2: l'attribut update lui-même peut porter l'id 'form:j_idtXXX'
+            if not schedule_id:
+                m2 = re.search(r'(form:j_idt\d+)', upd_id)
+                if m2:
+                    schedule_id = m2.group(1)
+
+            # parser le contenu HTML (CDATAs) pour extraire les input hidden à l'intérieur de cet update
+            soup_upd = BeautifulSoup(upd_text, "html.parser")
+            for inp in soup_upd.find_all("input", {"type": "hidden"}):
+                name = inp.get("name") or inp.get("id")
+                value = inp.get("value", "")
+                if name:
+                    collected_hidden[name] = value
+
+        # tenter d'extraire ViewState depuis ce XML (mise à jour)
+        new_vs = extract_viewstate_from_jsf_partial(r.text)
+    except ET.ParseError:
+        # fallback (si la réponse n'est pas strict XML) : extraire inputs depuis le HTML complet
+        soup = BeautifulSoup(r.text, "html.parser")
+        for inp in soup.find_all("input", {"type": "hidden"}):
+            name = inp.get("name") or inp.get("id")
+            value = inp.get("value", "")
+            if name:
+                collected_hidden[name] = value
+
+        # essayer de retrouver schedule_id dans le texte brut
+        m = re.search(r'PrimeFaces\.cw\("Schedule".*?id\s*:\s*"([^"]+)"', r.text)
+        if m:
+            schedule_id = m.group(1)
+        else:
+            m2 = re.search(r'<update id="(form:j_idt\d+)"', r.text)
+            if m2:
+                schedule_id = m2.group(1)
+
+        # fallback pour ViewState depuis HTML
+        new_vs = extract_viewstate_from_html(r.text)
+        if not new_vs:
+            new_vs = extract_viewstate_from_jsf_partial(r.text)
+
+    # fusionner les hidden collectés dans le payload si absent ou vide
+    for k, v in collected_hidden.items():
+        if k not in payload or not payload.get(k):
+            payload[k] = v
+
+    # mettre à jour ViewState si trouvé
     # fusionner les hidden collectés dans le payload si absent ou vide
     for k, v in collected_hidden.items():
         if k not in payload or not payload.get(k):
@@ -421,6 +486,7 @@ def requete_post(payload, name, url=None, ajax=False, extra_headers=None, pause=
 
     print(f"payload modifié ou pas : {payload}")
     return r
+
 
 
 # ------------------ Script simplifié utilisant requete_post ------------------
