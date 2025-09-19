@@ -705,6 +705,14 @@ print("Fini.")
 
     
 
-
 if __name__ == '__main__':
-    main()
+    max_essais = 10
+    for i in range(max_essais):
+        try:
+            main()
+            print(f"Succès ✅ à l'essai {i}")
+            break
+        except Exception as e:
+            print(f"Essai {i+1}/{max_essais} raté : {e}")
+    else:
+        print("Échec après tous les essais ❌")
