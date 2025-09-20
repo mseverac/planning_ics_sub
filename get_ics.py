@@ -41,59 +41,47 @@ import re
 import json
 from datetime import datetime
 
+import re
+import json
+from datetime import datetime
+from icalendar import Calendar, Event
+
 def save_ics_from_partial_response(partial_response: str, filename: str = "planning.ics"):
-    """
-    Extrait les événements d'une réponse partielle et génère un fichier ICS (planning.ics par défaut).
-    
-    Args:
-        partial_response (str): Réponse partielle contenant les événements.
-        filename (str): Nom du fichier ICS à sauvegarder.
-    """
-    # Extraction de la partie JSON après <![CDATA[
-    match = re.search(r'\[\{.*\}\]', partial_response, re.DOTALL)
+    # Chercher la portion JSON qui contient "events"
+    match = re.search(r'\{ *"events" *: *\[.*?\]\}', partial_response, re.DOTALL)
     if not match:
         raise ValueError("Impossible de trouver les événements dans la réponse partielle")
     
     events_json = match.group(0)
-    events = json.loads(events_json)
+    data = json.loads(events_json)
+    events = data.get("events", [])
 
-    # Création de l’entête ICS
-    ics_lines = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:-//Custom Export//EN",
-        "CALSCALE:GREGORIAN",
-        "METHOD:PUBLISH"
-    ]
+    cal = Calendar()
+    cal.add("prodid", "-//Planning Export//")
+    cal.add("version", "2.0")
 
     for ev in events:
+        # On vérifie que les champs existent
+        if "start" not in ev or "end" not in ev:
+            continue
+
         dt_start = datetime.fromisoformat(ev["start"].replace("Z", "+00:00"))
         dt_end = datetime.fromisoformat(ev["end"].replace("Z", "+00:00"))
+
+        ical_event = Event()
+        ical_event.add("uid", ev.get("id"))
+        ical_event.add("summary", ev.get("title", "Sans titre"))
+        ical_event.add("dtstart", dt_start)
+        ical_event.add("dtend", dt_end)
+        ical_event.add("description", ev.get("className", ""))
+
+        cal.add_component(ical_event)
+
+    with open(filename, "wb") as f:
+        f.write(cal.to_ical())
         
-        uid = ev["id"] + "@custom-export"
-        title = ev["title"].strip() if ev["title"] else "Sans titre"
         
-        ics_lines.extend([
-            "BEGIN:VEVENT",
-            f"UID:{uid}",
-            f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}",
-            f"DTSTART:{dt_start.strftime('%Y%m%dT%H%M%S')}",
-            f"DTEND:{dt_end.strftime('%Y%m%dT%H%M%S')}",
-            f"SUMMARY:{title}",
-            "END:VEVENT"
-        ])
-
-    # Fin du fichier ICS
-    ics_lines.append("END:VCALENDAR")
-
-    # Sauvegarde
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write("\n".join(ics_lines))
-    
-    print(f"✅ Fichier ICS généré : {filename}")
-
-
-
+        
 BASE = "https://onboard.ec-nantes.fr"
 LOGIN_PAGE = BASE + "/faces/Login.xhtml"
 MAINMENU_PAGE = BASE + "/faces/MainMenuPage.xhtml"
