@@ -46,39 +46,61 @@ import json
 from datetime import datetime
 from icalendar import Calendar, Event
 
-def save_ics_from_partial_response(partial_response: str, filename: str = "planning.ics"):
-    # Chercher la portion JSON qui contient "events"
-    match = re.search(r'\{ *"events" *: *\[.*?\]\}', partial_response, re.DOTALL)
-    if not match:
-        raise ValueError("Impossible de trouver les événements dans la réponse partielle")
-    
-    events_json = match.group(0)
-    data = json.loads(events_json)
-    events = data.get("events", [])
+def save_ics_from_partial_response(response_text: str, filename="monplanning.ics"):
+    """
+    Extrait les événements depuis une réponse partielle JSF contenant un JSON
+    et enregistre un fichier ICS.
+    """
+    # --- 1) extraire le JSON avec une regex ---
+    m = re.search(r'\[\{.*\}\]', response_text, re.DOTALL)
+    if not m:
+        raise ValueError("Impossible de trouver le JSON des événements dans la réponse.")
+    events_json = m.group(0)
 
-    cal = Calendar()
-    cal.add("prodid", "-//Planning Export//")
-    cal.add("version", "2.0")
+    # --- 2) parser le JSON ---
+    events = json.loads(events_json)
 
-    for ev in events:
-        # On vérifie que les champs existent
-        if "start" not in ev or "end" not in ev:
-            continue
+    # --- 3) construire le contenu ICS ---
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Onboard//Planning//FR",
+        "CALSCALE:GREGORIAN",
+    ]
 
-        dt_start = datetime.fromisoformat(ev["start"].replace("Z", "+00:00"))
-        dt_end = datetime.fromisoformat(ev["end"].replace("Z", "+00:00"))
 
-        ical_event = Event()
-        ical_event.add("uid", ev.get("id"))
-        ical_event.add("summary", ev.get("title", "Sans titre"))
-        ical_event.add("dtstart", dt_start)
-        ical_event.add("dtend", dt_end)
-        ical_event.add("description", ev.get("className", ""))
+    for ev in events[0]["events"]:
+        # convertir start/end en format UTC iCalendar
+        def to_ics_date(dt_str):
+            # exemple: "2025-09-08T10:15:00+0200"
+            dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S%z")
+            return dt.strftime("%Y%m%dT%H%M%S")
+        
 
-        cal.add_component(ical_event)
+        
 
-    with open(filename, "wb") as f:
-        f.write(cal.to_ical())
+        uid = ev.get("id", "") + "@onboard.ec-nantes.fr"
+        start = to_ics_date(ev["start"])
+        end = to_ics_date(ev["end"])
+        summary = ev.get("title", "").strip()
+
+        lines += [
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTART;TZID=Europe/Paris:{start}",
+            f"DTEND;TZID=Europe/Paris:{end}",
+            f"SUMMARY:{summary}",
+            "END:VEVENT",
+        ]
+
+    lines.append("END:VCALENDAR")
+
+    # --- 4) écrire le fichier ---
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    print(f"✅ Fichier ICS généré avec {len(events)} événements -> {filename}")
+        
         
         
         
