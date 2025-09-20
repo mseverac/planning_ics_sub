@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 lxml
+        run: pip install requests icalendar beautifulsoup4 lxml
       - name: Run script
         run: python get_ics.py
       - name: Deploy to GitHub Pages
