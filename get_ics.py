@@ -640,4 +640,8 @@ print("Fini.")
     
 
 if __name__ == '__main__':
-    main()
+    try :
+        main()
+
+    except:
+        print("XXXX get ICS failed")
