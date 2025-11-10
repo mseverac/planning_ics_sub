@@ -1,109 +1,25 @@
-# refactor of get_ics_full_flow.py
-# Usage: ensure mdp.password exists, then run `python3 get_ics_refactor.py`
+#!/usr/bin/env python3
+# get_ics.py — safe ICS generation + atomic replace
+# Usage: set ONBOARD_PASS env (and optional ONBOARD_USER), puis python get_ics.py
+
+import os
+import re
+import sys
+import time
+import json
+import shutil
+import tempfile
+import hashlib
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from urllib.parse import urljoin
+from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
-import xml.etree.ElementTree as ET
-from urllib.parse import urljoin
-import sys
-import time
-
-import re
-import json
-from datetime import datetime
-
-
-import os
-# Récupère le mot de passe depuis la variable d'environnement ONBOARD_PASS
-
-
-
-password = os.environ.get("ONBOARD_PASS")
-if not password:
-    raise SystemExit("Erreur: la variable d'environnement ONBOARD_PASS n'est pas définie. "
-                     "Sous GitHub Actions, ajoute-la dans Settings → Secrets.")
-
-
-
-# optionnel : username aussi configurable via env (par défaut ta valeur actuelle)
-USERNAME = os.environ.get("ONBOARD_USER", "mseverac2023")
-
-import re
-import json
-import hashlib
-from datetime import datetime
-from typing import Dict, Tuple
-
-
-new_id = None
-
-import re
-import json
-from datetime import datetime
-
-import re
-import json
-from datetime import datetime
 from icalendar import Calendar, Event
 
-def save_ics_from_partial_response(response_text: str, filename="monplanning.ics"):
-    """
-    Extrait les événements depuis une réponse partielle JSF contenant un JSON
-    et enregistre un fichier ICS.
-    """
-    # --- 1) extraire le JSON avec une regex ---
-    m = re.search(r'\[\{.*\}\]', response_text, re.DOTALL)
-    if not m:
-        raise ValueError("Impossible de trouver le JSON des événements dans la réponse.")
-    events_json = m.group(0)
-
-    # --- 2) parser le JSON ---
-    events = json.loads(events_json)
-
-    # --- 3) construire le contenu ICS ---
-    lines = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:-//Onboard//Planning//FR",
-        "CALSCALE:GREGORIAN",
-    ]
-
-
-    for ev in events[0]["events"]:
-        # convertir start/end en format UTC iCalendar
-        def to_ics_date(dt_str):
-            # exemple: "2025-09-08T10:15:00+0200"
-            dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S%z")
-            return dt.strftime("%Y%m%dT%H%M%S")
-        
-
-        
-
-        uid = ev.get("id", "") + "@onboard.ec-nantes.fr"
-        start = to_ics_date(ev["start"])
-        end = to_ics_date(ev["end"])
-        summary = ev.get("title", "").strip()
-
-        lines += [
-            "BEGIN:VEVENT",
-            f"UID:{uid}",
-            f"DTSTART;TZID=Europe/Paris:{start}",
-            f"DTEND;TZID=Europe/Paris:{end}",
-            f"SUMMARY:{summary}",
-            "END:VEVENT",
-        ]
-
-    lines.append("END:VCALENDAR")
-
-    # --- 4) écrire le fichier ---
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
-    print(f"✅ Fichier ICS généré avec {len(events)} événements -> {filename}")
-        
-        
-        
-        
+# ---------- Config ----------
 BASE = "https://onboard.ec-nantes.fr"
 LOGIN_PAGE = BASE + "/faces/Login.xhtml"
 MAINMENU_PAGE = BASE + "/faces/MainMenuPage.xhtml"
@@ -111,108 +27,101 @@ PLANNING_PAGE = BASE + "/faces/Planning.xhtml"
 
 UA = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:142.0) Gecko/20100101 Firefox/142.0"
 
-# session globale utilisée par la fonction requete_post
+# récupère mot de passe et user
+password = os.environ.get("ONBOARD_PASS")
+if not password:
+    # Ne pas écraser l'ancien planning si ONBOARD_PASS manquant
+    print("Erreur: la variable d'environnement ONBOARD_PASS n'est pas définie. Ajouter dans Settings → Secrets.")
+    # Le script termine normalement sans remplacer l'ICS.
+    sys.exit(0)
+
+USERNAME = os.environ.get("ONBOARD_USER", "mseverac2023")
+
+# session
 session = requests.Session()
 session.headers.update({"User-Agent": UA})
-# viewstate courant (sera mis à jour automatiquement par requete_post)
 current_viewstate = None
+new_id = None
 
-
-def save_debug_response(name, response):
+# ---------- Helpers ----------
+def save_debug_response(name, response_text):
     """Sauvegarde la réponse textuelle pour debug (HTML ou XML partial)."""
     fname = f"debug_response_{name}.html"
-    with open(fname, "w", encoding="utf-8") as f:
-        f.write(response.text)
-    print(f"-> debug saved: {fname} (len={len(response.text)})")
+    try:
+        with open(fname, "w", encoding="utf-8") as f:
+            f.write(response_text)
+        print(f"-> debug saved: {fname} (len={len(response_text)})")
+    except Exception as e:
+        print(f"[WARN] impossible d'écrire debug file {fname}: {e}")
 
-
-def extract_viewstate_from_html(html):
-    """Retourne la valeur de javax.faces.ViewState si présente dans un HTML."""
+def extract_viewstate_from_html(html: str) -> Optional[str]:
     soup = BeautifulSoup(html, "html.parser")
     inp = soup.find("input", {"name": "javax.faces.ViewState"})
     if inp and inp.get("value"):
         return inp["value"]
     return None
 
-
-def extract_viewstate_from_jsf_partial(xml_text):
-    """
-    JSF partial responses are XML like:
-    <?xml ...?><partial-response>...<update id="javax.faces.ViewState">VALUE</update>...</partial-response>
-    Return VALUE or None.
-    """
+def extract_viewstate_from_jsf_partial(xml_text: str) -> Optional[str]:
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
         return None
     for upd in root.findall('.//update'):
-        id_attr = upd.get('id') or upd.get('name') or ''
+        id_attr = upd.get('id') or ''
         if 'ViewState' in id_attr or 'javax.faces.ViewState' in id_attr:
             return (upd.text or '').strip()
     return None
 
-
 def ensure_success(r, context="request"):
     if r.status_code >= 400:
         print(f"[ERROR] {context} returned HTTP {r.status_code}")
-        print(r.text[:800])
-        sys.exit(1)
+        # sauvegarde debug
+        try:
+            save_debug_response(context, r.text)
+        except:
+            pass
+        raise RuntimeError(f"HTTP {r.status_code} for {context}")
 
-
-# ----- fonction demandée: requete_post -----
-from bs4 import BeautifulSoup
-import re
-
-def replace_id(payload,schedule_id,old_id):
-
+# ---------- ID replacement helpers ----------
+def replace_id(payload: dict, schedule_id: str, old_id: str):
     print(f"[replace_id] remplacement automatique : {old_id} -> {schedule_id}")
     for key in list(payload.keys()):
         if old_id in key:
             new_key = key.replace(old_id, schedule_id)
-            # déplacer la valeur vers la nouvelle clé
             payload[new_key] = payload.pop(key)
-    # remplacer les valeurs exactes égales à old_id
     for key in list(payload.keys()):
         if isinstance(payload[key], str) and payload[key] == old_id:
             payload[key] = schedule_id
 
-
-def get_old_id(payload):
+def get_old_id(payload: dict) -> Optional[str]:
     old_candidates = set()
-
-    # chercher dans les valeurs
     for v in payload.values():
         if isinstance(v, str):
             for m in re.findall(r'(form:j_idt\d+)', v):
                 old_candidates.add(m)
-    # chercher dans les clés
     for k in list(payload.keys()):
         for m in re.findall(r'(form:j_idt\d+)', k):
             old_candidates.add(m)
-
-    # prioriser la source explicite si présente
     old_id = None
     if isinstance(payload.get("javax.faces.source"), str) and re.match(r'form:j_idt\d+', payload.get("javax.faces.source")):
         old_id = payload.get("javax.faces.source")
     elif old_candidates:
-        # choisir le plus fréquent / premier candidat
         old_id = next(iter(old_candidates))
-
-
     return old_id
 
-def requete_post(payload, name, url=None, ajax=False, extra_headers=None, pause=1.0):
-    global current_viewstate, session,new_id
+# ---------- robust POST for JSF/PrimeFaces ----------
+def requete_post(payload: dict, name: str, url: Optional[str]=None, ajax: bool=False, extra_headers: dict=None, pause: float=1.0):
+    global current_viewstate, session, new_id
 
-
-    if new_id is not None :
-        replace_id(payload,new_id,get_old_id(payload))
+    if new_id is not None:
+        old_id = get_old_id(payload)
+        if old_id:
+            replace_id(payload, new_id, old_id)
 
     if url is None:
         url = MAINMENU_PAGE
 
-    # injecter le ViewState courant si pas déjà fourni
-    # injecter le ViewState courant si pas déjà fourni
+    # inject ViewState si absent
     if 'javax.faces.ViewState' not in payload or not payload.get('javax.faces.ViewState'):
         if current_viewstate:
             payload['javax.faces.ViewState'] = current_viewstate
@@ -238,62 +147,46 @@ def requete_post(payload, name, url=None, ajax=False, extra_headers=None, pause=
         headers.update(extra_headers)
 
     print(f"POST {name} -> {url} (ajax={ajax})")
+    print(f"payload before POST: keys={list(payload.keys())}")
 
-
-    print("----")
-    print(f"new id : {new_id}")
-    print(" ")
-    print(f"payload effectif : {payload}")
     r = session.post(url, data=payload, headers=headers, allow_redirects=True)
-    print(" ")
     ensure_success(r, f"POST {name}")
 
-    # -- tentative d'analyse robuste d'une partial-response JSF (XML) --
+    # Analysis: try XML partial first, else HTML fallback
     schedule_id = None
     collected_hidden = {}
+    new_vs = None
 
+    # try XML parse
     try:
         root = ET.fromstring(r.text)
-        # parcourir chaque <update> du partial-response
         for upd in root.findall(".//update"):
             upd_id = upd.get("id") or ""
             upd_text = upd.text or ""
-
-            # si l'update contient le composant schedule, on peut récupérer l'id
-            # cas 1: primefaces script contient id:"form:j_idtXXX"
             m = re.search(r'id\s*:\s*"([^"]+)"', upd_text)
             if m:
                 candidate = m.group(1)
-                # heuristique: les ids de primefaces commencent par 'form:j_idt'
                 if re.match(r'form:j_idt\d+', candidate):
                     schedule_id = candidate
-
-            # cas 2: l'attribut update lui-même peut porter l'id 'form:j_idtXXX'
             if not schedule_id:
                 m2 = re.search(r'(form:j_idt\d+)', upd_id)
                 if m2:
                     schedule_id = m2.group(1)
-
-            # parser le contenu HTML (CDATAs) pour extraire les input hidden à l'intérieur de cet update
             soup_upd = BeautifulSoup(upd_text, "html.parser")
             for inp in soup_upd.find_all("input", {"type": "hidden"}):
                 name = inp.get("name") or inp.get("id")
                 value = inp.get("value", "")
                 if name:
                     collected_hidden[name] = value
-
-        # tenter d'extraire ViewState depuis ce XML (mise à jour)
         new_vs = extract_viewstate_from_jsf_partial(r.text)
     except ET.ParseError:
-        # fallback (si la réponse n'est pas strict XML) : extraire inputs depuis le HTML complet
+        # fallback to HTML parsing
         soup = BeautifulSoup(r.text, "html.parser")
         for inp in soup.find_all("input", {"type": "hidden"}):
             name = inp.get("name") or inp.get("id")
             value = inp.get("value", "")
             if name:
                 collected_hidden[name] = value
-
-        # essayer de retrouver schedule_id dans le texte brut
         m = re.search(r'PrimeFaces\.cw\("Schedule".*?id\s*:\s*"([^"]+)"', r.text)
         if m:
             schedule_id = m.group(1)
@@ -301,347 +194,321 @@ def requete_post(payload, name, url=None, ajax=False, extra_headers=None, pause=
             m2 = re.search(r'<update id="(form:j_idt\d+)"', r.text)
             if m2:
                 schedule_id = m2.group(1)
+        new_vs = extract_viewstate_from_html(r.text) or extract_viewstate_from_jsf_partial(r.text)
 
-        # fallback pour ViewState depuis HTML
-        new_vs = extract_viewstate_from_html(r.text)
-        if not new_vs:
-            new_vs = extract_viewstate_from_jsf_partial(r.text)
-    # -- tentative d'analyse robuste d'une partial-response JSF (XML) --
-    schedule_id = None
-    collected_hidden = {}
-
-    try:
-        root = ET.fromstring(r.text)
-        # parcourir chaque <update> du partial-response
-        for upd in root.findall(".//update"):
-            upd_id = upd.get("id") or ""
-            upd_text = upd.text or ""
-
-            # si l'update contient le composant schedule, on peut récupérer l'id
-            # cas 1: primefaces script contient id:"form:j_idtXXX"
-            m = re.search(r'id\s*:\s*"([^"]+)"', upd_text)
-            if m:
-                candidate = m.group(1)
-                # heuristique: les ids de primefaces commencent par 'form:j_idt'
-                if re.match(r'form:j_idt\d+', candidate):
-                    schedule_id = candidate
-
-            # cas 2: l'attribut update lui-même peut porter l'id 'form:j_idtXXX'
-            if not schedule_id:
-                m2 = re.search(r'(form:j_idt\d+)', upd_id)
-                if m2:
-                    schedule_id = m2.group(1)
-
-            # parser le contenu HTML (CDATAs) pour extraire les input hidden à l'intérieur de cet update
-            soup_upd = BeautifulSoup(upd_text, "html.parser")
-            for inp in soup_upd.find_all("input", {"type": "hidden"}):
-                name = inp.get("name") or inp.get("id")
-                value = inp.get("value", "")
-                if name:
-                    collected_hidden[name] = value
-
-        # tenter d'extraire ViewState depuis ce XML (mise à jour)
-        new_vs = extract_viewstate_from_jsf_partial(r.text)
-    except ET.ParseError:
-        # fallback (si la réponse n'est pas strict XML) : extraire inputs depuis le HTML complet
-        soup = BeautifulSoup(r.text, "html.parser")
-        for inp in soup.find_all("input", {"type": "hidden"}):
-            name = inp.get("name") or inp.get("id")
-            value = inp.get("value", "")
-            if name:
-                collected_hidden[name] = value
-
-        # essayer de retrouver schedule_id dans le texte brut
-        m = re.search(r'PrimeFaces\.cw\("Schedule".*?id\s*:\s*"([^"]+)"', r.text)
-        if m:
-            schedule_id = m.group(1)
-        else:
-            m2 = re.search(r'<update id="(form:j_idt\d+)"', r.text)
-            if m2:
-                schedule_id = m2.group(1)
-
-        # fallback pour ViewState depuis HTML
-        new_vs = extract_viewstate_from_html(r.text)
-        if not new_vs:
-            new_vs = extract_viewstate_from_jsf_partial(r.text)
-
-    # fusionner les hidden collectés dans le payload si absent ou vide
+    # merge collected hidden into payload if missing
     for k, v in collected_hidden.items():
         if k not in payload or not payload.get(k):
             payload[k] = v
 
-    # mettre à jour ViewState si trouvé
-    # fusionner les hidden collectés dans le payload si absent ou vide
-    for k, v in collected_hidden.items():
-        if k not in payload or not payload.get(k):
-            payload[k] = v
-
-    # mettre à jour ViewState si trouvé
     if new_vs:
         if new_vs != current_viewstate:
             print(f"[viewstate] mis à jour après {name} (len={len(new_vs)})")
         current_viewstate = new_vs
         payload["javax.faces.ViewState"] = current_viewstate
 
-    # --- détecter l'old_id présent dans le payload (ex: form:j_idt118) ---
+    # detect old_id and replace if schedule_id found
     old_candidates = set()
-
-    # chercher dans les valeurs
     for v in payload.values():
         if isinstance(v, str):
             for m in re.findall(r'(form:j_idt\d+)', v):
                 old_candidates.add(m)
-    # chercher dans les clés
     for k in list(payload.keys()):
         for m in re.findall(r'(form:j_idt\d+)', k):
             old_candidates.add(m)
-
-    # prioriser la source explicite si présente
     old_id = None
     if isinstance(payload.get("javax.faces.source"), str) and re.match(r'form:j_idt\d+', payload.get("javax.faces.source")):
         old_id = payload.get("javax.faces.source")
     elif old_candidates:
-        # choisir le plus fréquent / premier candidat
         old_id = next(iter(old_candidates))
 
-    # si on a un schedule_id différent de old_id, on remplace toutes les clés/valeurs contenant old_id
     if schedule_id:
-
-        print(" ")
-        print("---->>>> remplacement auto   <<<<<-------")
-        print(schedule_id)
-        print(" ")
+        print("schedule_id détecté:", schedule_id)
         if old_id and old_id != schedule_id:
             new_id = schedule_id
-            
-            replace_id(payload,schedule_id,old_id)
-        # s'assurer que les champs source/execute/render pointent vers le schedule_id
+            replace_id(payload, schedule_id, old_id)
         payload["javax.faces.source"] = schedule_id
         payload["javax.faces.partial.execute"] = schedule_id
         payload["javax.faces.partial.render"] = schedule_id
         payload[schedule_id] = schedule_id
 
-    # courte pause pour ne pas spammer le serveur
     if pause:
         time.sleep(pause)
 
-    print(f"payload modifié ou pas : {payload}")
+    print(f"POST {name} done (len response={len(r.text)})")
     return r
 
+# ---------- ICS generation & safe write ----------
+def generate_ics_from_partial_response(response_text: str) -> str:
+    """
+    Extrait le JSON présent dans une réponse partielle JSF (ex: '[{...}]') puis génère
+    un texte ICS (string). Lève ValueError si JSON non trouvé ou format inattendu.
+    """
+    m = re.search(r'\[\{.*\}\]', response_text, re.DOTALL)
+    if not m:
+        raise ValueError("Impossible de trouver le JSON des événements dans la réponse.")
+    events_json = m.group(0)
+    events = json.loads(events_json)
 
+    # Construction du ICS en string (on garde le format UTC natif)
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Onboard//Planning//FR",
+        "CALSCALE:GREGORIAN",
+    ]
 
-# ------------------ Script simplifié utilisant requete_post ------------------
-
-def main():
-    global current_viewstate, session
-
-    # 1) GET page de login
-    print("GET login page...")
-    r = session.get(LOGIN_PAGE)
-    ensure_success(r, "GET login page")
-    #save_debug_response("1_get_login", r)
-
-    current_viewstate = extract_viewstate_from_html(r.text)
-    if not current_viewstate:
-        print("Impossible de trouver ViewState sur la page de login.")
-        sys.exit(1)
-    print("ViewState login trouvé (len):", len(current_viewstate))
-
-    # récupérer action du formulaire si présent
-    soup = BeautifulSoup(r.text, "html.parser")
-    form = soup.find("form", id="formulaireSpring")
-    if form and form.get("action"):
-        login_post_url = urljoin(BASE, form["action"])
-    else:
-        login_post_url = LOGIN_PAGE
-    print("Login POST URL:", login_post_url)
-
-    # 2) POST login
-    login_payload = {
-        "username": "mseverac2023",
-        "password": password,
-        "j_idt27": "",
-        # javax.faces.ViewState will be injecté automatiquement par requete_post
-    }
-    r = requete_post(login_payload, "post_login", url=login_post_url, ajax=False)
-
-    # vérifier si login OK sinon GET / et réessayer
-    if ("Déconnexion" in r.text) or ("Mon compte" in r.text) or ("MainMenuPage" in r.text):
-        print("✅ Login probablement réussi (détecté par mot-clé).")
-    else:
-        print("Login response ne contient pas les mots-clés attendus, GET / pour confirmer...")
-        r2 = session.get(BASE + "/")
-        #save_debug_response("after_login_get_root", r2)
-        if "Déconnexion" in r2.text or "MainMenuPage" in r2.text:
-            print("✅ Après GET /, on est connecté.")
-            r = r2
+    # Certains payloads ont events encapsulés différemment : on assure robustesse
+    # On suppose events est une liste, et events[0]["events"] contient la liste réelle
+    evt_container = events[0].get("events") if isinstance(events, list) and events else None
+    if evt_container is None:
+        # peut-être events est déjà la liste d'événements
+        if isinstance(events, list) and all(isinstance(x, dict) and "start" in x for x in events):
+            evt_container = events
         else:
-            print("❌ Login semble échouer — vérifier identifiants ou ViewState envoyé.")
-            print(r.text[:500])
-            sys.exit(1)
+            raise ValueError("Format JSON inattendu pour les événements.")
 
-    # 3) GET MainMenuPage pour avoir un ViewState propre
-    print("GET MainMenuPage...")
-    r = session.get(MAINMENU_PAGE)
-    ensure_success(r, "GET MainMenuPage")
-    #save_debug_response("get_mainmenu", r)
-    vs = extract_viewstate_from_html(r.text) or extract_viewstate_from_jsf_partial(r.text)
-    if vs:
-        current_viewstate = vs
-        print("ViewState main trouvé (len):", len(current_viewstate))
-    else:
-        print("Pas de ViewState trouvé sur MainMenuPage -> abort")
-        sys.exit(1)
+    def to_ics_date(dt_str):
+        # exemple: "2025-09-08T10:15:00+0200"
+        dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S%z")
+        return dt.strftime("%Y%m%dT%H%M%S")
 
-    # 4) POST requête 1 (AJAX) — ouverture sous-menu
-    payload1 = {
-        "javax.faces.partial.ajax": "true",
-        "javax.faces.source": "form:j_idt52",
-        "javax.faces.partial.execute": "form:j_idt52",
-        "javax.faces.partial.render": "form:sidebar",
-        "form:j_idt52": "form:j_idt52",
-        "webscolaapp.Sidebar.ID_SUBMENU": "submenu_8817755",
-        "form": "form",
-        "form:largeurDivCenter": "907",
-        "form:idInit": "webscolaapp.MainMenuPage_5977318950196537139",
-        "form:sauvegarde": "",
-        "form:j_idt856:j_idt858_reflowDD": "0_0",
-        "form:j_idt815_focus": "",
-        "form:j_idt815_input": "45803",
-        # ViewState injecté automatiquement
-    }
+    for ev in evt_container:
+        uid = (ev.get("id", "") or "") + "@onboard.ec-nantes.fr"
+        start = to_ics_date(ev["start"])
+        end = to_ics_date(ev["end"])
+        summary = (ev.get("title", "") or "").strip().replace("\n", " ").replace("\r", " ")
+        lines += [
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTART;TZID=Europe/Paris:{start}",
+            f"DTEND;TZID=Europe/Paris:{end}",
+            f"SUMMARY:{summary}",
+            "END:VEVENT",
+        ]
 
-    global new_id
+    lines.append("END:VCALENDAR")
+    return "\n".join(lines)
 
+def write_ics_safely(ics_text: str, final_path="planning.ics"):
+    """
+    Écrit dans un fichier tmp, parse l'ICS avec icalendar et s'assure qu'il y a au moins 1 VEVENT,
+    puis remplace final_path atomiquement. Lève ValueError en cas de pb de validation.
+    """
+    fd, tmp_path = tempfile.mkstemp(suffix=".ics.tmp")
+    os.close(fd)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(ics_text)
 
-    r = requete_post(payload1, "ajax_open_submenu", url=MAINMENU_PAGE, ajax=True)
+        # Validation : parser l'ICS (binaire)
+        with open(tmp_path, "rb") as f:
+            try:
+                cal = Calendar.from_ical(f.read())
+            except Exception as e:
+                raise ValueError(f"Parse ICS failed: {e}")
 
-    # 5) POST requête 2 (navigation vers Planning)
-    payload2 = {
-        "form": "form",
-        "form:largeurDivCenter": "907",
-        "form:idInit": "webscolaapp.MainMenuPage_5977318950196537139",
-        "form:sauvegarde": "",
-        "form:j_idt856:j_idt858_reflowDD": "0_0",
-        "form:j_idt815_focus": "",
-        "form:j_idt815_input": "45803",
-        "form:sidebar": "form:sidebar",
-        "form:sidebar_menuid": "8_0",
-    }
+        has_event = any(comp.name == "VEVENT" for comp in cal.walk())
+        if not has_event:
+            raise ValueError("ICS parsed mais ne contient aucun VEVENT -> rejeté")
 
-    new_id = "form:j_idt141"
+        # taille minimale (heuristique)
+        if os.path.getsize(tmp_path) < 200:
+            raise ValueError("ICS trop petit -> rejeté")
 
-    r = requete_post(payload2, "navigate_planning", url=MAINMENU_PAGE, ajax=False)
+        # remplacement atomique
+        shutil.move(tmp_path, final_path)
+        print(f"✅ {final_path} mis à jour en atomique.")
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except:
+                pass
 
-    # attendre que la navigation se fasse côté serveur
-    print("Attente courte pour que la navigation prenne effet...")
-    time.sleep(2)
+# ---------- Script principal ----------
+def main():
+    global current_viewstate, session, new_id
+    try:
+        print("GET login page...")
+        r = session.get(LOGIN_PAGE)
+        ensure_success(r, "GET login page")
+        current_viewstate = extract_viewstate_from_html(r.text)
+        if not current_viewstate:
+            raise RuntimeError("Impossible de trouver ViewState sur la page de login.")
+        print("ViewState login trouvé (len):", len(current_viewstate))
 
-    # essaye d'extraire le ViewState depuis la réponse de navigation
-    vs = extract_viewstate_from_html(r.text) or extract_viewstate_from_jsf_partial(r.text)
-    if vs:
-        current_viewstate = vs
+        # récupérer action du formulaire si présent
+        soup = BeautifulSoup(r.text, "html.parser")
+        form = soup.find("form", id="formulaireSpring")
+        if form and form.get("action"):
+            login_post_url = urljoin(BASE, form["action"])
+        else:
+            login_post_url = LOGIN_PAGE
+        print("Login POST URL:", login_post_url)
 
-    # 6) GET Planning.xhtml au besoin pour récupérer inputs dynamiques
-    print("GET Planning.xhtml pour récupérer tokens si nécessaire...")
-    r_planning = session.get(PLANNING_PAGE)
-    ensure_success(r_planning, "GET Planning.xhtml")
-    #save_debug_response("planning_page_get", r_planning)
+        # POST login
+        login_payload = {
+            "username": USERNAME,
+            "password": password,
+            "j_idt27": "",
+        }
+        r = requete_post(login_payload, "post_login", url=login_post_url, ajax=False)
 
-    # extraire ViewState planning
-    viewstate_planning = extract_viewstate_from_html(r_planning.text) or extract_viewstate_from_jsf_partial(r_planning.text)
-    if not viewstate_planning:
-        print("Impossible de récupérer ViewState sur Planning.xhtml -> abort")
-        sys.exit(1)
-    current_viewstate = viewstate_planning
-    print("ViewState planning (len):", len(current_viewstate))
+        if ("Déconnexion" in r.text) or ("Mon compte" in r.text) or ("MainMenuPage" in r.text):
+            print("✅ Login probablement réussi (mot-clé détecté).")
+        else:
+            print("Login response ne contient pas les mots-clés attendus, GET / pour confirmer...")
+            r2 = session.get(BASE + "/")
+            if "Déconnexion" in r2.text or "MainMenuPage" in r2.text:
+                print("✅ Après GET /, on est connecté.")
+                r = r2
+            else:
+                raise RuntimeError("❌ Login semble échouer — vérifier identifiants ou ViewState envoyé.")
 
-    soup = BeautifulSoup(r_planning.text, "html.parser")
+        # GET MainMenuPage pour ViewState propre
+        print("GET MainMenuPage...")
+        r = session.get(MAINMENU_PAGE)
+        ensure_success(r, "GET MainMenuPage")
+        vs = extract_viewstate_from_html(r.text) or extract_viewstate_from_jsf_partial(r.text)
+        if vs:
+            current_viewstate = vs
+            print("ViewState main trouvé (len):", len(current_viewstate))
+        else:
+            raise RuntimeError("Pas de ViewState trouvé sur MainMenuPage -> abort")
 
-    def get_input_value(soup, name, default=None):
-        el = soup.find("input", {"name": name})
-        if not el:
-            return default
-        return el.get("value", default)
-
-    largeur = get_input_value(soup, "form:largeurDivCenter", "907")
-    id_init_val = get_input_value(soup, "form:idInit", "webscolaapp.Planning_-1425867247129692267")
-    print("idInit:", id_init_val)
-
-    # 7) POST requête 3 (download ICS)
-
-
-    def dl_ics(date,week):
-        payload3 = {
+        # requête 1 : ouverture sous-menu (AJAX)
+        payload1 = {
             "javax.faces.partial.ajax": "true",
-            "javax.faces.source": "form:j_idt118",
-            "javax.faces.partial.execute": "form:j_idt118",
-            "javax.faces.partial.render": "form:j_idt118",
-            "form:j_idt118": "form:j_idt118",
-            # timestamps: ajuster si besoin
-            "form:j_idt118_start": "1757887200000",
-            "form:j_idt118_end": "1775944800000",
+            "javax.faces.source": "form:j_idt52",
+            "javax.faces.partial.execute": "form:j_idt52",
+            "javax.faces.partial.render": "form:sidebar",
+            "form:j_idt52": "form:j_idt52",
+            "webscolaapp.Sidebar.ID_SUBMENU": "submenu_8817755",
             "form": "form",
-            "form:largeurDivCenter": largeur,
-            "form:idInit": id_init_val,
-            "form:date_input": date,
-            "form:week": week,
-            "form:j_idt118_view": "agendaWeek",
-            "form:offsetFuseauNavigateur": "-7200000",
-            "form:onglets_activeIndex": "0",
-            "form:onglets_scrollState": "0",
-            # ViewState injecté automatiquement
+            "form:largeurDivCenter": "907",
+            "form:idInit": "webscolaapp.MainMenuPage_5977318950196537139",
+            "form:sauvegarde": "",
+            "form:j_idt856:j_idt858_reflowDD": "0_0",
+            "form:j_idt815_focus": "",
+            "form:j_idt815_input": "45803",
+        }
+        r = requete_post(payload1, "ajax_open_submenu", url=MAINMENU_PAGE, ajax=True)
+
+        # navigation vers Planning
+        payload2 = {
+            "form": "form",
+            "form:largeurDivCenter": "907",
+            "form:idInit": "webscolaapp.MainMenuPage_5977318950196537139",
+            "form:sauvegarde": "",
+            "form:j_idt856:j_idt858_reflowDD": "0_0",
+            "form:j_idt815_focus": "",
+            "form:j_idt815_input": "45803",
+            "form:sidebar": "form:sidebar",
+            "form:sidebar_menuid": "8_0",
         }
 
-        r = requete_post(payload3, "download_ics", url=PLANNING_PAGE, ajax=False, pause=1.0)
+        # tu peux ajuster si besoin : heuristique initiale pour l'id
+        new_id = "form:j_idt141"
+        r = requete_post(payload2, "navigate_planning", url=MAINMENU_PAGE, ajax=False)
 
-        payload4 = {
-            "javax.faces.partial.ajax": "true",
-            "javax.faces.source": "form:j_idt118",
-            "javax.faces.partial.execute": "form:j_idt118",
-            "javax.faces.partial.render": "form:j_idt118",
-            "form:j_idt118": "form:j_idt118",
-            "form:j_idt118_start": "1757677600000",
-            "form:j_idt118_end": "1775944800000",
-            "form": "form",
-            "form:largeurDivCenter": "1550",
-            "form:idInit": "webscolaapp.Planning_-3130307915882446410",
-            "form:date_input": date,
-            "form:week": week,
-            "form:j_idt118_view": "agendaWeek",
-            "form:offsetFuseauNavigateur": "-7200000",
-            "form:onglets_activeIndex": "0",
-            "form:onglets_scrollState": "0",
-        }
+        print("Attente courte pour que la navigation prenne effet...")
+        time.sleep(2)
 
-        r = requete_post(payload4, "final_ics_download", url=PLANNING_PAGE, ajax=False, pause=1.0)
+        vs = extract_viewstate_from_html(r.text) or extract_viewstate_from_jsf_partial(r.text)
+        if vs:
+            current_viewstate = vs
 
+        # GET Planning.xhtml pour récupérer tokens / inputs
+        print("GET Planning.xhtml pour récupérer tokens si nécessaire...")
+        r_planning = session.get(PLANNING_PAGE)
+        ensure_success(r_planning, "GET Planning.xhtml")
+        viewstate_planning = extract_viewstate_from_html(r_planning.text) or extract_viewstate_from_jsf_partial(r_planning.text)
+        if not viewstate_planning:
+            raise RuntimeError("Impossible de récupérer ViewState sur Planning.xhtml -> abort")
+        current_viewstate = viewstate_planning
+        print("ViewState planning (len):", len(current_viewstate))
 
+        soup = BeautifulSoup(r_planning.text, "html.parser")
+        def get_input_value(soup, name, default=None):
+            el = soup.find("input", {"name": name})
+            if not el:
+                return default
+            return el.get("value", default)
 
-        content = r.text
+        largeur = get_input_value(soup, "form:largeurDivCenter", "907")
+        id_init_val = get_input_value(soup, "form:idInit", "webscolaapp.Planning_-1425867247129692267")
+        print("idInit:", id_init_val)
 
-        print("----------")
+        # Fonction pour télécharger et générer ICS
+        def dl_ics(date, week):
+            # payload de téléchargement (tu peux ajuster timestamps si besoin)
+            payload3 = {
+                "javax.faces.partial.ajax": "true",
+                "javax.faces.source": "form:j_idt118",
+                "javax.faces.partial.execute": "form:j_idt118",
+                "javax.faces.partial.render": "form:j_idt118",
+                "form:j_idt118": "form:j_idt118",
+                "form:j_idt118_start": "1757887200000",
+                "form:j_idt118_end": "1775944800000",
+                "form": "form",
+                "form:largeurDivCenter": largeur,
+                "form:idInit": id_init_val,
+                "form:date_input": date,
+                "form:week": week,
+                "form:j_idt118_view": "agendaWeek",
+                "form:offsetFuseauNavigateur": "-7200000",
+                "form:onglets_activeIndex": "0",
+                "form:onglets_scrollState": "0",
+            }
+            r = requete_post(payload3, "download_ics", url=PLANNING_PAGE, ajax=False, pause=1.0)
 
-        print(content)
+            payload4 = {
+                "javax.faces.partial.ajax": "true",
+                "javax.faces.source": "form:j_idt118",
+                "javax.faces.partial.execute": "form:j_idt118",
+                "javax.faces.partial.render": "form:j_idt118",
+                "form:j_idt118": "form:j_idt118",
+                "form:j_idt118_start": "1757677600000",
+                "form:j_idt118_end": "1775944800000",
+                "form": "form",
+                "form:largeurDivCenter": "1550",
+                "form:idInit": "webscolaapp.Planning_-3130307915882446410",
+                "form:date_input": date,
+                "form:week": week,
+                "form:j_idt118_view": "agendaWeek",
+                "form:offsetFuseauNavigateur": "-7200000",
+                "form:onglets_activeIndex": "0",
+                "form:onglets_scrollState": "0",
+            }
+            r = requete_post(payload4, "final_ics_download", url=PLANNING_PAGE, ajax=False, pause=1.0)
 
-        print("----------")
+            content = r.text
+            # debug dump
+            print("---------- server response start ----------")
+            print(content[:2000])
+            print("---------- server response end ----------")
 
-        save_ics_from_partial_response(content, filename="planning.ics")
+            # tenter de générer ICS puis écrire atomiquement
+            ics_text = generate_ics_from_partial_response(content)
+            write_ics_safely(ics_text, final_path="planning.ics")
 
-    date1 = "15/09/2025"
-    week1 = "38-2025"
+        # Les paramètres que tu utilises (ajuste si besoin)
+        date1 = "15/09/2025"
+        week1 = "38-2025"
+        dl_ics(date1, week1)
 
-
-    dl_ics(date1,week1)
-
-print("Fini.")
-
-
-    
+        print("Fini.")
+    except Exception as e:
+        # En cas d'erreur, on logge et on ne remplace PAS l'ancien planning.ics
+        print(f"[ERROR] get ICS failed : {e}")
+        # sauvegarde d'un debug si possible
+        try:
+            save_debug_response("failure", str(e))
+        except:
+            pass
+        # Ne pas échouer brutalement pour que GitHub Actions conserve l'ancien fichier
+        return
 
 if __name__ == '__main__':
-    try :
-        main()
-
-    except:
-        print("XXXX get ICS failed")
+    main()
