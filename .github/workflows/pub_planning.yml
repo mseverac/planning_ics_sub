@@ -1,8 +1,9 @@
 name: Export OnBoard ICS
 on:
   schedule:
-    - cron: "0 * * * *"   # toutes les heures
+    - cron: "0 * * * *"
   workflow_dispatch:
+
 jobs:
   run-script:
     runs-on: ubuntu-latest
@@ -11,18 +12,61 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install dependencies
         run: pip install requests icalendar beautifulsoup4 lxml
+
       - name: Run script
-        run: python get_ics.py
+        id: run-script
+        run: |
+          set -e
+          python get_ics.py
+        # si ton script gère les erreurs en interne et ne lève pas, enlève set -e et gère sa sortie
+
+      - name: Show ICS size (debug)
+        run: |
+          if [ -f planning.ics ]; then echo "planning.ics size: $(stat -c%s planning.ics)"; else echo "planning.ics absent"; fi
+
+      - name: Commit ICS only if new and non-empty
+        id: commit_ics
+        run: |
+          # default output
+          echo "changed=false" >> $GITHUB_OUTPUT
+
+          # require planning.ics present and non-zero
+          if [ ! -s planning.ics ]; then
+            echo "planning.ics absent or empty -> skip commit/push"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # add file and check changes
+          git add planning.ics || true
+
+          # if no diff, nothing to do
+          if git diff --cached --quiet; then
+            echo "No changes to planning.ics"
+            exit 0
+          fi
+
+          git commit -m "Update planning.ics (automated) [ci skip]" || true
+          git push origin HEAD:main
+
+          echo "changed=true" >> $GITHUB_OUTPUT
+
       - name: Deploy to GitHub Pages
+        if: steps.commit_ics.outputs.changed == 'true'
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: .
           destination_dir: .
-        if: github.ref == 'refs/heads/main'
