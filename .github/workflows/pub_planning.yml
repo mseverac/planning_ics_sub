@@ -37,31 +37,55 @@ jobs:
       - name: Commit ICS only if new and non-empty
         id: commit_ics
         run: |
-          # default output
           echo "changed=false" >> $GITHUB_OUTPUT
 
-          # require planning.ics present and non-zero
           if [ ! -s planning.ics ]; then
-            echo "planning.ics absent or empty -> skip commit/push"
+            echo "planning.ics absent ou vide -> skip commit/push"
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # add file and check changes
+          # s'assurer qu'on est sur la bonne branche checkout par actions/checkout
+          git checkout --progress --force main || git checkout -B main
+
+          # add la modification
           git add planning.ics || true
 
-          # if no diff, nothing to do
+          # si pas de changement, exit
           if git diff --cached --quiet; then
             echo "No changes to planning.ics"
             exit 0
           fi
 
+          # récupérer la remote
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          git fetch origin main --depth=1
+
+          # tenter un rebase local sur origin/main (autostash pour stash automatique)
+          set +e
+          git rebase --autostash origin/main
+          REBASE_STATUS=$?
+          set -e
+
+          if [ $REBASE_STATUS -ne 0 ]; then
+            echo "Rebase échoué (conflit ou autre). Abandon du push pour éviter d'écraser la remote."
+            # annuler le rebase si partiellement appliqué
+            git rebase --abort || true
+            # restore index (on n'a pas committé localement donc on peut reset)
+            git reset --hard origin/main || true
+            exit 0
+          fi
+
+          # commit & push (rebase successful => safe to push)
           git commit -m "Update planning.ics (automated) [ci skip]" || true
+
+          # push avec vérification (fast-forward or non-fast-forward handled since we rebased)
           git push origin HEAD:main
 
           echo "changed=true" >> $GITHUB_OUTPUT
+
 
       - name: Deploy to GitHub Pages
         if: steps.commit_ics.outputs.changed == 'true'
