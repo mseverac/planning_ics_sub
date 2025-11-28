@@ -42,17 +42,16 @@ jobs:
           else
             echo "planning.ics absent";
           fi
+
       - name: Commit ICS only if new and >= 11 events
         id: commit_ics
         run: |
           set -euo pipefail
           echo "changed=false" >> $GITHUB_OUTPUT
 
-          # --- ensure repo remote & sync first (avoid autostash invalidating staged changes) ---
+          # sync remote early
           git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
           git fetch origin main --depth=1 || true
-
-          # Checkout main and update with rebase+autostash (fail safe)
           git checkout --progress --force main || git checkout -B main
           set +e
           git pull --rebase --autostash origin main
@@ -65,7 +64,6 @@ jobs:
             exit 0
           fi
 
-          # Now run the file checks and inject metadata
           if [ ! -s planning.ics ]; then
             echo "planning.ics absent ou vide -> skip commit/push"
             exit 0
@@ -93,33 +91,44 @@ jobs:
             ' planning.ics > planning.ics.tmp && mv planning.ics.tmp planning.ics
           fi
 
-          # ensure no janky index flags
+          # ensure index flags cleared
           git update-index --really-refresh || true
           git update-index --no-assume-unchanged planning.ics || true
           git update-index --no-skip-worktree planning.ics || true
 
-          # attempt add (force if necessary)
-          if git add -v planning.ics; then
-            echo "git add succeeded"
-          else
-            echo "git add failed — trying forced add"
+          # compute working blob
+          WORK_BLOB=$(git hash-object -w planning.ics)
+          echo "working blob: $WORK_BLOB"
+          # try to add and ensure staged blob equals working blob (retry up to 3x)
+          ATTEMPT=0
+          while [ $ATTEMPT -lt 3 ]; do
+            ATTEMPT=$((ATTEMPT+1))
+            echo "git add attempt #$ATTEMPT"
             git add -f planning.ics
-          fi
 
-          # show staged and working state for debug
-          git status --porcelain=2 --branch || true
-          echo "Staged files:"
-          git diff --staged --name-only || true
+            # get staged blob (from index)
+            INDEX_LINE=$(git ls-files -s planning.ics || true)
+            STAGED_BLOB=$(echo "$INDEX_LINE" | awk '{print $2}')
+            echo "staged blob: $STAGED_BLOB"
 
-          if git diff --cached --quiet; then
-            echo "Nothing staged after add — fallback: make an empty commit to force deploy"
-            git commit --allow-empty -m "Force deploy planning.ics (no content diff) [ci skip]"
+            if [ -n "$STAGED_BLOB" ] && [ "$STAGED_BLOB" = "$WORK_BLOB" ]; then
+              echo "staged blob matches working blob"
+              break
+            fi
+            echo "Mismatch between staged blob and working blob; retrying add after short sleep"
+            sleep 1
+          done
+
+          # final check
+          if [ -z "$STAGED_BLOB" ] || [ "$STAGED_BLOB" != "$WORK_BLOB" ]; then
+            echo "WARNING: couldn't stage the exact working file blob. Falling back to empty commit to force deploy."
+            git commit --allow-empty -m "Force deploy planning.ics (staging mismatch) [ci skip]"
             git push origin HEAD:main
             echo "changed=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # commit & push
+          # There is something staged; commit and push
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
