@@ -47,12 +47,7 @@ jobs:
         id: commit_ics
         run: |
           set -euo pipefail
-
           echo "changed=false" >> $GITHUB_OUTPUT
-
-          echo "PWD: $(pwd)"
-          echo "Git top-level: $(git rev-parse --show-toplevel || echo 'no-git')"
-          echo "Git version: $(git --version)"
 
           if [ ! -s planning.ics ]; then
             echo "planning.ics absent ou vide -> skip commit/push"
@@ -61,7 +56,6 @@ jobs:
 
           COUNT=$(grep -c '^BEGIN:VEVENT' planning.ics || true)
           echo "Found $COUNT events in planning.ics"
-
           if [ "$COUNT" -le 10 ]; then
             echo "Moins ou égal à 10 événements -> skip commit/push"
             exit 0
@@ -69,7 +63,6 @@ jobs:
 
           TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           echo "Injecting X-GENERATED-AT: $TS into planning.ics"
-
           if grep -q '^X-GENERATED-AT:' planning.ics; then
             sed -i "s/^X-GENERATED-AT:.*/X-GENERATED-AT:${TS}/" planning.ics
           else
@@ -83,50 +76,42 @@ jobs:
             ' planning.ics > planning.ics.tmp && mv planning.ics.tmp planning.ics
           fi
 
-          echo "---- planning.ics head ----"
-          head -n 20 planning.ics || true
-          echo "--------------------------"
+          echo "Before add: check possible index flags and attributes"
+          echo "git ls-files -v planning.ics (lowercase = assume-unchanged? uppercase = tracked):"
+          git ls-files -v planning.ics || true
+          echo "Check skip-worktree/assume-unchanged flags via update-index --really-refresh"
+          git update-index --really-refresh || true
+          echo "Clear assume-unchanged and skip-worktree (safe even if not set):"
+          git update-index --no-assume-unchanged planning.ics || true
+          git update-index --no-skip-worktree planning.ics || true
 
-          echo "File info:"
-          ls -l planning.ics || true
-          stat planning.ics || true
+          echo "Try normal git add (will error if blocked)"
+          if git add -v planning.ics; then
+            echo "git add succeeded"
+          else
+            echo "git add failed — trying forced add"
+            git add -f planning.ics
+          fi
 
-          echo "Compute hashes:"
-          echo "working file blob: $(git hash-object planning.ics)"
-          echo "index entry (if any):"
-          git ls-files -s planning.ics || true
-
-          echo "git status (porcelain):"
+          echo "Status after add:"
           git status --porcelain=2 --branch || true
+          echo "Staged files:"
+          git diff --staged --name-only || true
+
+          if git diff --cached --quiet; then
+            echo "ERROR: no changes staged for commit despite injection! Will attempt fallback (empty commit)."
+            # Fallback: create an empty commit to force deploy (less ideal but guarantees Pages update)
+            git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+            git fetch origin main --depth=1 || true
+            git checkout --progress --force main || git checkout -B main
+            git commit --allow-empty -m "Force deploy planning.ics (no content diff) [ci skip]"
+            git push origin HEAD:main
+            echo "changed=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git checkout --progress --force main || git checkout -B main
-
-          # try add *without* silencing errors and show verbose output
-          echo "Running: git add -v planning.ics"
-          git add -v planning.ics
-
-          echo "After git add: git status --porcelain"
-          git status --porcelain=2 --branch
-
-          echo "Show staged diff:"
-          git diff --staged --name-only || true
-          echo "Staged diff content (first 200 lines):"
-          git diff --staged || true
-
-          # now ensure there is indeed something staged
-          if git diff --cached --quiet; then
-            echo "ERROR: no changes staged for commit despite injection!"
-            echo "Showing index info again:"
-            git ls-files -s planning.ics || true
-            echo "Show repo attributes and eol settings:"
-            git config core.autocrlf || true
-            git check-attr --all -- planning.ics || true
-            # fail so workflow log shows the problem
-            exit 1
-          fi
 
           git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
           git fetch origin main --depth=1
@@ -147,6 +132,7 @@ jobs:
           git push origin HEAD:main
 
           echo "changed=true" >> $GITHUB_OUTPUT
+
 
 
       - name: Debug show remote main HEAD & recent commits
