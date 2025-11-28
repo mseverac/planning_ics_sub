@@ -4,11 +4,10 @@ on:
     - cron: "*/15 * * * *"
   workflow_dispatch:
 
-# --- IMPORTANT: permissions nécessaires pour écrire dans Pages ---
 permissions:
-  contents: write        # pour push dans le repo
-  pages: write          # pour déployer Pages avec GITHUB_TOKEN
-  id-token: write       # utile si on utilise des actions d'authentification (facultatif)
+  contents: write
+  pages: write
+  id-token: write
 
 jobs:
   run-script:
@@ -27,7 +26,8 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests icalendar beautifulsoup4 lxml
+        run: |
+          pip install requests icalendar beautifulsoup4 lxml
 
       - name: Run script
         id: run-script
@@ -37,7 +37,11 @@ jobs:
 
       - name: Show ICS size (debug)
         run: |
-          if [ -f planning.ics ]; then echo "planning.ics size: $(stat -c%s planning.ics)"; else echo "planning.ics absent"; fi
+          if [ -f planning.ics ]; then
+            echo "planning.ics size: $(stat -c%s planning.ics)";
+          else
+            echo "planning.ics absent";
+          fi
 
       - name: Commit ICS only if new and >= 11 events
         id: commit_ics
@@ -51,6 +55,7 @@ jobs:
 
           COUNT=$(grep -c '^BEGIN:VEVENT' planning.ics || true)
           echo "Found $COUNT events in planning.ics"
+
           if [ "$COUNT" -le 10 ]; then
             echo "Moins ou égal à 10 événements -> skip commit/push"
             exit 0
@@ -88,8 +93,7 @@ jobs:
 
           echo "changed=true" >> $GITHUB_OUTPUT
 
-      # --- Debug : afficher l'état de la branche main après le push ---
-      - name: Debug: show remote main HEAD & recent commits
+      - name: Debug show remote main HEAD & recent commits
         if: steps.commit_ics.outputs.changed == 'true'
         run: |
           echo "=== ls remote heads ==="
@@ -107,8 +111,7 @@ jobs:
           publish_branch: gh-pages
           destination_dir: .
 
-      # --- Debug: check gh-pages branch after deploy (reads remote) ---
-      - name: Debug: check gh-pages branch contents
+      - name: Debug check gh-pages branch contents
         if: steps.commit_ics.outputs.changed == 'true'
         run: |
           echo "=== remote gh-pages heads ==="
