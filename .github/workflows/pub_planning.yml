@@ -46,13 +46,16 @@ jobs:
       - name: Commit ICS only if new and >= 11 events
         id: commit_ics
         run: |
+          # default output
           echo "changed=false" >> $GITHUB_OUTPUT
 
+          # file must exist and be non-empty
           if [ ! -s planning.ics ]; then
             echo "planning.ics absent ou vide -> skip commit/push"
             exit 0
           fi
 
+          # count events
           COUNT=$(grep -c '^BEGIN:VEVENT' planning.ics || true)
           echo "Found $COUNT events in planning.ics"
 
@@ -61,15 +64,13 @@ jobs:
             exit 0
           fi
 
-          # --- inject/update a deterministic metadata line so file content changes ---
+          # inject/update deterministic metadata line so file content changes
           TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           echo "Injecting X-GENERATED-AT: $TS into planning.ics"
 
           if grep -q '^X-GENERATED-AT:' planning.ics; then
-            # replace existing line
             sed -i "s/^X-GENERATED-AT:.*/X-GENERATED-AT:${TS}/" planning.ics
           else
-            # insert right after the first BEGIN:VCALENDAR
             awk -v ts="$TS" '
               BEGIN { inserted=0 }
               { print }
@@ -80,7 +81,7 @@ jobs:
             ' planning.ics > planning.ics.tmp && mv planning.ics.tmp planning.ics
           fi
 
-          # debug: show head of file and the injected line
+          # debug: show head of file
           echo "---- planning.ics head ----"
           head -n 20 planning.ics || true
           echo "--------------------------"
@@ -92,7 +93,7 @@ jobs:
 
           git add planning.ics || true
 
-          # now there should be a change because we injected/updated X-GENERATED-AT
+          # after injection there must be a change
           if git diff --cached --quiet; then
             echo "Unexpected: no changes to planning.ics after injection -> aborting"
             exit 0
@@ -117,7 +118,6 @@ jobs:
           git push origin HEAD:main
 
           echo "changed=true" >> $GITHUB_OUTPUT
-
 
       - name: Debug show remote main HEAD & recent commits
         if: steps.commit_ics.outputs.changed == 'true'
