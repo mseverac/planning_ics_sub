@@ -1,14 +1,8 @@
 name: Export OnBoard ICS
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "0 * * * *"   # toutes les heures
   workflow_dispatch:
-
-permissions:
-  contents: write
-  pages: write
-  id-token: write
-
 jobs:
   run-script:
     runs-on: ubuntu-latest
@@ -17,151 +11,18 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
-        run: |
-          pip install requests icalendar beautifulsoup4 lxml
-
+        run: pip install requests icalendar beautifulsoup4 lxml
       - name: Run script
-        id: run-script
-        run: |
-          set -e
-          python get_ics.py
-
-      - name: Show ICS size (debug)
-        run: |
-          if [ -f planning.ics ]; then
-            echo "planning.ics size: $(stat -c%s planning.ics)";
-          else
-            echo "planning.ics absent";
-          fi
-
-      - name: Commit ICS only if new and >= 11 events
-        id: commit_ics
-        run: |
-          set -euo pipefail
-          echo "changed=false" >> $GITHUB_OUTPUT
-
-          # sync remote early
-          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-          git fetch origin main --depth=1 || true
-          git checkout --progress --force main || git checkout -B main
-          set +e
-          git pull --rebase --autostash origin main
-          REBASE_STATUS=$?
-          set -e
-          if [ $REBASE_STATUS -ne 0 ]; then
-            echo "Rebase/pull échoué (conflit ou autre). Abandon pour éviter d'écraser la remote."
-            git rebase --abort || true
-            git reset --hard origin/main || true
-            exit 0
-          fi
-
-          if [ ! -s planning.ics ]; then
-            echo "planning.ics absent ou vide -> skip commit/push"
-            exit 0
-          fi
-
-          COUNT=$(grep -c '^BEGIN:VEVENT' planning.ics || true)
-          echo "Found $COUNT events in planning.ics"
-          if [ "$COUNT" -le 10 ]; then
-            echo "Moins ou égal à 10 événements -> skip commit/push"
-            exit 0
-          fi
-
-          TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          echo "Injecting X-GENERATED-AT: $TS into planning.ics"
-          if grep -q '^X-GENERATED-AT:' planning.ics; then
-            sed -i "s/^X-GENERATED-AT:.*/X-GENERATED-AT:${TS}/" planning.ics
-          else
-            awk -v ts="$TS" '
-              BEGIN { inserted=0 }
-              { print }
-              !inserted && $0 ~ /^BEGIN:VCALENDAR/ {
-                print "X-GENERATED-AT:" ts
-                inserted=1
-              }
-            ' planning.ics > planning.ics.tmp && mv planning.ics.tmp planning.ics
-          fi
-
-          # ensure index flags cleared
-          git update-index --really-refresh || true
-          git update-index --no-assume-unchanged planning.ics || true
-          git update-index --no-skip-worktree planning.ics || true
-
-          # compute working blob
-          WORK_BLOB=$(git hash-object -w planning.ics)
-          echo "working blob: $WORK_BLOB"
-          # try to add and ensure staged blob equals working blob (retry up to 3x)
-          ATTEMPT=0
-          while [ $ATTEMPT -lt 3 ]; do
-            ATTEMPT=$((ATTEMPT+1))
-            echo "git add attempt #$ATTEMPT"
-            git add -f planning.ics
-
-            # get staged blob (from index)
-            INDEX_LINE=$(git ls-files -s planning.ics || true)
-            STAGED_BLOB=$(echo "$INDEX_LINE" | awk '{print $2}')
-            echo "staged blob: $STAGED_BLOB"
-
-            if [ -n "$STAGED_BLOB" ] && [ "$STAGED_BLOB" = "$WORK_BLOB" ]; then
-              echo "staged blob matches working blob"
-              break
-            fi
-            echo "Mismatch between staged blob and working blob; retrying add after short sleep"
-            sleep 1
-          done
-
-          # final check
-          if [ -z "$STAGED_BLOB" ] || [ "$STAGED_BLOB" != "$WORK_BLOB" ]; then
-            echo "WARNING: couldn't stage the exact working file blob. Falling back to empty commit to force deploy."
-            git commit --allow-empty -m "Force deploy planning.ics (staging mismatch) [ci skip]"
-            git push origin HEAD:main
-            echo "changed=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # There is something staged; commit and push
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git commit -m "Update planning.ics (automated) [ci skip]"
-          git push origin HEAD:main
-
-          echo "changed=true" >> $GITHUB_OUTPUT
-
-
-      - name: Debug show remote main HEAD & recent commits
-        if: steps.commit_ics.outputs.changed == 'true'
-        run: |
-          echo "=== ls remote heads ==="
-          git ls-remote --heads origin || true
-          echo "=== recent commits on origin/main ==="
-          git fetch origin main --depth=5 || true
-          git log --oneline --decorate -n 5 origin/main || true
-
+        run: python get_ics.py
       - name: Deploy to GitHub Pages
-        if: steps.commit_ics.outputs.changed == 'true'
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: .
-          publish_branch: gh-pages
           destination_dir: .
-
-      - name: Debug check gh-pages branch contents
-        if: steps.commit_ics.outputs.changed == 'true'
-        run: |
-          echo "=== remote gh-pages heads ==="
-          git ls-remote --heads origin gh-pages || true
-          echo "=== try fetch gh-pages (if exists) ==="
-          git fetch origin gh-pages --depth=1 || true
-          echo "=== ls-tree gh-pages (remote) ==="
-          git ls-tree -r --name-only origin/gh-pages || true
+        if: github.ref == 'refs/heads/main'
