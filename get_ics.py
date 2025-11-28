@@ -19,7 +19,42 @@ import requests
 from bs4 import BeautifulSoup
 from icalendar import Calendar, Event
 
-# ---------- Config ----------
+def save_ics_from_partial_response(partial_response: str, filename: str = "planning.ics"):
+    # Chercher la portion JSON qui contient "events"
+    match = re.search(r'\{ *"events" *: *\[.*?\]\}', partial_response, re.DOTALL)
+    if not match:
+        raise ValueError("Impossible de trouver les événements dans la réponse partielle")
+    
+    events_json = match.group(0)
+    data = json.loads(events_json)
+    events = data.get("events", [])
+
+    cal = Calendar()
+    cal.add("prodid", "-//Planning Export//")
+    cal.add("version", "2.0")
+
+    for ev in events:
+        # On vérifie que les champs existent
+        if "start" not in ev or "end" not in ev:
+            continue
+
+        dt_start = datetime.fromisoformat(ev["start"].replace("Z", "+00:00"))
+        dt_end = datetime.fromisoformat(ev["end"].replace("Z", "+00:00"))
+
+        ical_event = Event()
+        ical_event.add("uid", ev.get("id"))
+        ical_event.add("summary", ev.get("title", "Sans titre"))
+        ical_event.add("dtstart", dt_start)
+        ical_event.add("dtend", dt_end)
+        ical_event.add("description", ev.get("className", ""))
+
+        cal.add_component(ical_event)
+
+    with open(filename, "wb") as f:
+        f.write(cal.to_ical())
+        
+        
+        
 BASE = "https://onboard.ec-nantes.fr"
 LOGIN_PAGE = BASE + "/faces/Login.xhtml"
 MAINMENU_PAGE = BASE + "/faces/MainMenuPage.xhtml"
