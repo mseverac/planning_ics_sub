@@ -1,8 +1,14 @@
 name: Export OnBoard ICS
 on:
   schedule:
-    - cron: "*/15 * * * *"   # toutes les 15 minutes
+    - cron: "*/15 * * * *"
   workflow_dispatch:
+
+# --- IMPORTANT: permissions nécessaires pour écrire dans Pages ---
+permissions:
+  contents: write        # pour push dans le repo
+  pages: write          # pour déployer Pages avec GITHUB_TOKEN
+  id-token: write       # utile si on utilise des actions d'authentification (facultatif)
 
 jobs:
   run-script:
@@ -28,7 +34,6 @@ jobs:
         run: |
           set -e
           python get_ics.py
-        # si ton script gère les erreurs en interne et ne lève pas, enlève set -e et gère sa sortie
 
       - name: Show ICS size (debug)
         run: |
@@ -37,20 +42,15 @@ jobs:
       - name: Commit ICS only if new and >= 11 events
         id: commit_ics
         run: |
-          # Par défaut, marquer changed=false
           echo "changed=false" >> $GITHUB_OUTPUT
 
-          # check file presence & non-empty
           if [ ! -s planning.ics ]; then
             echo "planning.ics absent ou vide -> skip commit/push"
             exit 0
           fi
 
-          # compter les VEVENT (BEGIN:VEVENT)
           COUNT=$(grep -c '^BEGIN:VEVENT' planning.ics || true)
           echo "Found $COUNT events in planning.ics"
-
-          # si <= 10, on skip (on veut au moins 11)
           if [ "$COUNT" -le 10 ]; then
             echo "Moins ou égal à 10 événements -> skip commit/push"
             exit 0
@@ -59,23 +59,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # s'assurer qu'on est sur la bonne branche checkout par actions/checkout
           git checkout --progress --force main || git checkout -B main
 
-          # add la modification
           git add planning.ics || true
 
-          # si pas de changement, exit
           if git diff --cached --quiet; then
             echo "No changes to planning.ics"
             exit 0
           fi
 
-          # récupérer la remote (utilise GITHUB_TOKEN)
           git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
           git fetch origin main --depth=1
 
-          # tenter un rebase local sur origin/main (autostash pour stash automatique)
           set +e
           git rebase --autostash origin/main
           REBASE_STATUS=$?
@@ -83,20 +78,25 @@ jobs:
 
           if [ $REBASE_STATUS -ne 0 ]; then
             echo "Rebase échoué (conflit ou autre). Abandon du push pour éviter d'écraser la remote."
-            # annuler le rebase si partiellement appliqué
             git rebase --abort || true
-            # restore index
             git reset --hard origin/main || true
             exit 0
           fi
 
-          # commit & push (rebase successful => safe to push)
           git commit -m "Update planning.ics (automated) [ci skip]" || true
-
-          # push avec vérification (fast-forward or non-fast-forward handled since we rebased)
           git push origin HEAD:main
 
           echo "changed=true" >> $GITHUB_OUTPUT
+
+      # --- Debug : afficher l'état de la branche main après le push ---
+      - name: Debug: show remote main HEAD & recent commits
+        if: steps.commit_ics.outputs.changed == 'true'
+        run: |
+          echo "=== ls remote heads ==="
+          git ls-remote --heads origin || true
+          echo "=== recent commits on origin/main ==="
+          git fetch origin main --depth=5 || true
+          git log --oneline --decorate -n 5 origin/main || true
 
       - name: Deploy to GitHub Pages
         if: steps.commit_ics.outputs.changed == 'true'
@@ -104,4 +104,16 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: .
+          publish_branch: gh-pages
           destination_dir: .
+
+      # --- Debug: check gh-pages branch after deploy (reads remote) ---
+      - name: Debug: check gh-pages branch contents
+        if: steps.commit_ics.outputs.changed == 'true'
+        run: |
+          echo "=== remote gh-pages heads ==="
+          git ls-remote --heads origin gh-pages || true
+          echo "=== try fetch gh-pages (if exists) ==="
+          git fetch origin gh-pages --depth=1 || true
+          echo "=== ls-tree gh-pages (remote) ==="
+          git ls-tree -r --name-only origin/gh-pages || true
