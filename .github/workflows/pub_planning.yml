@@ -43,7 +43,7 @@ jobs:
             echo "planning.ics absent";
           fi
 
-            - name: Commit ICS only if new and >= 11 events
+      - name: Commit ICS only if new and >= 11 events
         id: commit_ics
         run: |
           echo "changed=false" >> $GITHUB_OUTPUT
