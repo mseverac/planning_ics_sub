@@ -42,13 +42,30 @@ jobs:
           else
             echo "planning.ics absent";
           fi
-
       - name: Commit ICS only if new and >= 11 events
         id: commit_ics
         run: |
           set -euo pipefail
           echo "changed=false" >> $GITHUB_OUTPUT
 
+          # --- ensure repo remote & sync first (avoid autostash invalidating staged changes) ---
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          git fetch origin main --depth=1 || true
+
+          # Checkout main and update with rebase+autostash (fail safe)
+          git checkout --progress --force main || git checkout -B main
+          set +e
+          git pull --rebase --autostash origin main
+          REBASE_STATUS=$?
+          set -e
+          if [ $REBASE_STATUS -ne 0 ]; then
+            echo "Rebase/pull échoué (conflit ou autre). Abandon pour éviter d'écraser la remote."
+            git rebase --abort || true
+            git reset --hard origin/main || true
+            exit 0
+          fi
+
+          # Now run the file checks and inject metadata
           if [ ! -s planning.ics ]; then
             echo "planning.ics absent ou vide -> skip commit/push"
             exit 0
@@ -76,16 +93,12 @@ jobs:
             ' planning.ics > planning.ics.tmp && mv planning.ics.tmp planning.ics
           fi
 
-          echo "Before add: check possible index flags and attributes"
-          echo "git ls-files -v planning.ics (lowercase = assume-unchanged? uppercase = tracked):"
-          git ls-files -v planning.ics || true
-          echo "Check skip-worktree/assume-unchanged flags via update-index --really-refresh"
+          # ensure no janky index flags
           git update-index --really-refresh || true
-          echo "Clear assume-unchanged and skip-worktree (safe even if not set):"
           git update-index --no-assume-unchanged planning.ics || true
           git update-index --no-skip-worktree planning.ics || true
 
-          echo "Try normal git add (will error if blocked)"
+          # attempt add (force if necessary)
           if git add -v planning.ics; then
             echo "git add succeeded"
           else
@@ -93,46 +106,27 @@ jobs:
             git add -f planning.ics
           fi
 
-          echo "Status after add:"
+          # show staged and working state for debug
           git status --porcelain=2 --branch || true
           echo "Staged files:"
           git diff --staged --name-only || true
 
           if git diff --cached --quiet; then
-            echo "ERROR: no changes staged for commit despite injection! Will attempt fallback (empty commit)."
-            # Fallback: create an empty commit to force deploy (less ideal but guarantees Pages update)
-            git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-            git fetch origin main --depth=1 || true
-            git checkout --progress --force main || git checkout -B main
+            echo "Nothing staged after add — fallback: make an empty commit to force deploy"
             git commit --allow-empty -m "Force deploy planning.ics (no content diff) [ci skip]"
             git push origin HEAD:main
             echo "changed=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
+          # commit & push
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-          git fetch origin main --depth=1
-
-          set +e
-          git rebase --autostash origin/main
-          REBASE_STATUS=$?
-          set -e
-
-          if [ $REBASE_STATUS -ne 0 ]; then
-            echo "Rebase échoué (conflit ou autre). Abandon du push pour éviter d'écraser la remote."
-            git rebase --abort || true
-            git reset --hard origin/main || true
-            exit 0
-          fi
 
           git commit -m "Update planning.ics (automated) [ci skip]"
           git push origin HEAD:main
 
           echo "changed=true" >> $GITHUB_OUTPUT
-
 
 
       - name: Debug show remote main HEAD & recent commits
