@@ -293,26 +293,13 @@ def generate_ics_from_partial_response(response_text: str) -> str:
 def write_ics_safely(ics_text: str, final_path="planning.ics"):
     """
     Écrit dans un fichier tmp, parse l'ICS avec icalendar et s'assure qu'il y a au moins 1 VEVENT,
-    puis remplace final_path atomiquement. On fsync avant le move pour éviter des races.
+    puis remplace final_path atomiquement. Lève ValueError en cas de pb de validation.
     """
     fd, tmp_path = tempfile.mkstemp(suffix=".ics.tmp")
     os.close(fd)
     try:
-        # write + fsync on tmp file
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(ics_text)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except Exception:
-                # fsync may not be available on some platforms, ignore if so
-                pass
-
-        # ensure data is pushed to filesystem
-        try:
-            os.sync()
-        except Exception:
-            pass
 
         # Validation : parser l'ICS (binaire)
         with open(tmp_path, "rb") as f:
@@ -338,7 +325,6 @@ def write_ics_safely(ics_text: str, final_path="planning.ics"):
                 os.remove(tmp_path)
             except:
                 pass
-
 
 # ---------- Script principal ----------
 def main():
