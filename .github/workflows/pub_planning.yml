@@ -43,7 +43,7 @@ jobs:
             echo "planning.ics absent";
           fi
 
-      - name: Commit ICS only if new and >= 11 events
+            - name: Commit ICS only if new and >= 11 events
         id: commit_ics
         run: |
           echo "changed=false" >> $GITHUB_OUTPUT
@@ -61,6 +61,30 @@ jobs:
             exit 0
           fi
 
+          # --- inject/update a deterministic metadata line so file content changes ---
+          TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "Injecting X-GENERATED-AT: $TS into planning.ics"
+
+          if grep -q '^X-GENERATED-AT:' planning.ics; then
+            # replace existing line
+            sed -i "s/^X-GENERATED-AT:.*/X-GENERATED-AT:${TS}/" planning.ics
+          else
+            # insert right after the first BEGIN:VCALENDAR
+            awk -v ts="$TS" '
+              BEGIN { inserted=0 }
+              { print }
+              !inserted && $0 ~ /^BEGIN:VCALENDAR/ {
+                print "X-GENERATED-AT:" ts
+                inserted=1
+              }
+            ' planning.ics > planning.ics.tmp && mv planning.ics.tmp planning.ics
+          fi
+
+          # debug: show head of file and the injected line
+          echo "---- planning.ics head ----"
+          head -n 20 planning.ics || true
+          echo "--------------------------"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -68,8 +92,9 @@ jobs:
 
           git add planning.ics || true
 
+          # now there should be a change because we injected/updated X-GENERATED-AT
           if git diff --cached --quiet; then
-            echo "No changes to planning.ics"
+            echo "Unexpected: no changes to planning.ics after injection -> aborting"
             exit 0
           fi
 
@@ -92,6 +117,7 @@ jobs:
           git push origin HEAD:main
 
           echo "changed=true" >> $GITHUB_OUTPUT
+
 
       - name: Debug show remote main HEAD & recent commits
         if: steps.commit_ics.outputs.changed == 'true'
