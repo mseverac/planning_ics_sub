@@ -364,7 +364,7 @@ def write_ics_safely(ics_text: str, final_path="planning.ics"):
 # ---------- Script principal ----------
 def main():
     global current_viewstate, session, new_id
-    try:
+    if True :
         print("GET login page...")
         r = session.get(LOGIN_PAGE)
         ensure_success(r, "GET login page")
@@ -534,7 +534,7 @@ def main():
         dl_ics(date1, week1)
 
         print("Fini.")
-    except Exception as e:
+    """except Exception as e:
         # En cas d'erreur, on logge et on ne remplace PAS l'ancien planning.ics
         print(f"[ERROR] get ICS failed : {e}")
         # sauvegarde d'un debug si possible
@@ -543,7 +543,7 @@ def main():
         except:
             pass
         # Ne pas échouer brutalement pour que GitHub Actions conserve l'ancien fichier
-        return
+        return"""
 
 if __name__ == '__main__':
     main()
