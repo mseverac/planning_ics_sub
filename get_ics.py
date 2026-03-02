@@ -364,7 +364,7 @@ def write_ics_safely(ics_text: str, final_path="planning.ics"):
 # ---------- Script principal ----------
 def main():
     global current_viewstate, session, new_id
-    if true :
+    if True :
         print("GET login page...")
         r = session.get(LOGIN_PAGE)
         ensure_success(r, "GET login page")
